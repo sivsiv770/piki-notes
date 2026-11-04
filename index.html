@@ -1239,7 +1239,18 @@ const Metrics=(()=>{
   function evaluate(truth,got,opts){
     opts=opts||{};
     const timed=truth.length>0&&truth.every(t=>typeof t.t==="number");
-    const rows=align(truth,got,timed);
+    let rows=align(truth,got,timed);
+    /* Beats only: the first pass may pair a note with a nearby false copy. Pair again by the time the steady pulse predicts. */
+    if(!timed&&truth.length&&truth.every(t=>typeof t.beats==="number")){
+      const ps=[];let px=0;for(const t of truth){ps.push(px);px+=t.beats+(t.restAfter||0)}
+      for(let pass=0;pass<2;pass++){
+        const ft=fitBeats(rows,ps);if(!ft)break;
+        const second=align(truth.map((t,i)=>({...t,t:ft.a+ft.b*ps[i]})),got,true).map(r=>r.exp?{...r,exp:truth[r.i]}:r);
+        const okCount=l=>l.filter(r=>r.status==="ok").length;
+        if(okCount(second)<okCount(rows))break;
+        rows=second;
+      }
+    }
     let C=0,S=0,D=0,I=0,oct=0;
     for(const r of rows){if(r.status==="ok")C++;else if(r.status==="sub"){S++;if(r.octave)oct++}else if(r.status==="del")D++;else I++}
     const N=truth.length,out={n:N,detected:got.length,correct:C,subs:S,dels:D,ins:I,octaveErrors:oct,rows};
@@ -1857,7 +1868,7 @@ app.addEventListener("keydown",e=>{if(e.target.id==="tr-filelab"&&(e.key==="Ente
 
 /* ---------- microphone check, real guitar test kit, developer report ---------- */
 /* The address where the app runs in its own window, outside the viewer's frame. Empty until it is deployed. */
-const PUBLIC_URL="__PUBLIC_URL__".startsWith("__")?"":"__PUBLIC_URL__";
+const PUBLIC_URL="https://sivsiv770.github.io/piki-notes/";
 const ENGINES={"0.2":Transcriber,"0.1":TranscriberV01};
 const inFrame=(()=>{try{return window.top!==window}catch(e){return true}})();
 function standaloneLink(){
@@ -1933,7 +1944,7 @@ async function micListen(){
   if(Mic.stream){Mic.stop();MC.live=false;document.getElementById("mc-start").textContent="לבקש גישה ולהקשיב";out.textContent="ההקשבה נעצרה.";return}
   try{
     await Mic.start((f,r)=>{
-      const m=document.getElementById("mc-meter");if(m)m.style.width=Math.min(100,r*700)+"%";
+      const m=document.getElementById("mc-meter");if(m)m.style.width=Math.min(100,r*700)+"%";MC.log.maxLevel=Math.max(MC.log.maxLevel||0,+r.toFixed(4));
       if(f&&out){const mf=69+12*Math.log2(f/440),mr=Math.round(mf);MC.log.heard=(MC.log.heard||0)+1;out.textContent=`שומע: ${plain(noteOf(mr))}, ${f.toFixed(1)} הרץ, סטייה של ${Math.round((mf-mr)*100)} סנט`}
     });
     const tr=Mic.stream.getAudioTracks()[0],s=tr&&tr.getSettings?tr.getSettings():{};
@@ -1953,7 +1964,7 @@ async function micRec5(){
           let pk=0;for(let i=0;i<x.length;i+=4)pk=Math.max(pk,Math.abs(x[i]));MC.log.recPeak=+pk.toFixed(3);
           MC.clip={x,sr:ab.sampleRate};
           const res=await Transcriber.transcribe(x,ab.sampleRate,{yield:()=>new Promise(q=>setTimeout(q,0))});
-          MC.log.recNotes=res.notes.length;MC.log.recVerdict=res.verdict;
+          MC.log.recNotes=res.notes.length;MC.log.recVerdict=res.verdict;MC.log.recNames=res.notes.map(n=>midiName(n.midi)+"@"+n.t0);
           out.textContent=`ההקלטה נקלטה: ${MC.log.recSec} שניות, עוצמת שיא ${Math.round(pk*100)}%, ${res.notes.length} תווים זוהו: ${res.notes.map(n=>plain(noteOf(n.midi))).join(", ")||"אין"}.`;
           document.getElementById("mc-more").insertAdjacentHTML("beforeend",`<div class="row"><button class="btn small" id="mc-play">להאזין להקלטת הניסיון</button></div>`);
         }catch(e){MC.log.recError=e.name||"decode";out.textContent="ההקלטה הצליחה אבל הדפדפן לא פענח אותה: "+(e.name||"")}
@@ -2016,7 +2027,8 @@ async function analyse(x,sr,ver){
 async function runTake(k,x,sr,how){
   DV.busy=`מנתחים את "${k.title}"...`;drawDev();
   const a=await analyse(x,sr,"0.2"),m=k.unsuit?null:compactEval(Metrics.evaluate(k.truth,a.res.notes));
-  const take={id:k.id+"-"+Date.now(),kit:k.id,when:new Date().toISOString(),how,engine:"0.2",ms:a.ms,rtf:a.rtf,crash:a.crash,verdict:a.res.verdict||"ok",warnings:a.res.warnings||[],conf:a.res.confidence,bpm:a.res.bpm,sec:+(x.length/sr).toFixed(1),eval:m,got:a.res.notes,ua:navigator.userAgent,pcm:toPcm(x,sr)};
+  let peak=0;for(let i=0;i<x.length;i+=4)peak=Math.max(peak,Math.abs(x[i]));
+  const take={id:k.id+"-"+Date.now(),kit:k.id,when:new Date().toISOString(),how,engine:"0.2",ms:a.ms,rtf:a.rtf,crash:a.crash,verdict:a.res.verdict||"ok",warnings:a.res.warnings||[],conf:a.res.confidence,bpm:a.res.bpm,sec:+(x.length/sr).toFixed(1),peak:+peak.toFixed(3),eval:m,got:a.res.notes,ua:navigator.userAgent,pcm:toPcm(x,sr)};
   try{await Store.put("takes",take)}catch(e){DV.msg="התוצאה לא נשמרה בדפדפן הזה."}
   DV.takes.push(take);DV.busy="";DV.open=take.id;drawDev();
 }
@@ -2063,7 +2075,7 @@ function kitCard(k){
     ${t&&DV.open===t.id?takeReport(t):""}</section>`;
 }
 function takeReport(t){
-  return`<div class="trbox inner"><p class="note-text">${new Date(t.when).toLocaleString("he-IL")}, מנוע ${t.engine}, ${t.how==="mic"?"מיקרופון":"קובץ"}. ההקלטה ${t.sec} שניות, עיבוד ${(t.ms/1000).toFixed(1)} שניות (פי ${t.rtf} מהזמן האמיתי). ${t.eval&&t.eval.fitBpm?`קצב ${t.eval.fitBpm}, סטיית תזמון חציונית ${t.eval.timingMs} אלפיות שנייה.`:""}</p>${t.crash?`<p class="trerr">קריסה: ${esc(t.crash)}</p>`:""}${t.eval?metricBox(t.eval)+rowsTable(t.eval.rows):`<p>זוהו ${t.got.length} תווים, ${VERD[t.verdict]}.</p>`}<div class="row"><button class="btn small" data-takedel="${t.id}">למחוק את ההרצה</button></div></div>`;
+  return`<div class="trbox inner"><p class="note-text">${new Date(t.when).toLocaleString("he-IL")}, מנוע ${t.engine}, ${t.how==="mic"?"מיקרופון":"קובץ"}. ההקלטה ${t.sec} שניות, עיבוד ${(t.ms/1000).toFixed(1)} שניות (פי ${t.rtf} מהזמן האמיתי). ${t.eval&&t.eval.fitBpm?`קצב ${t.eval.fitBpm}, סטיית תזמון חציונית ${t.eval.timingMs} אלפיות שנייה.`:""}</p>${t.crash?`<p class="trerr">קריסה: ${esc(t.crash)}</p>`:""}${t.eval?metricBox(t.eval)+rowsTable(t.eval.rows):`<p>זוהו ${t.got.length} תווים, ${VERD[t.verdict]}.</p>`}${t.peak!=null&&t.peak<.12?`<p class="trerr">האות חלש (שיא ${Math.round(t.peak*100)}%). כדאי לקרב את הטלפון לגיטרה ולהקליט שוב.</p>`:""}<div class="row"><button class="btn small" data-takewav="${t.id}">לשמור את ההקלטה כקובץ</button><button class="btn small" data-takedel="${t.id}">למחוק את ההרצה</button></div></div>`;
 }
 function kitStaff(k){
   const notes=k.truth.map(t=>noteOf(t.midi)),r=stepRange(notes),top=-r.hi*S,H=(r.hi-r.lo)*S+74,base=-r.lo*S;let g="";const W=120+notes.length*84;
@@ -2081,7 +2093,7 @@ function drawDev(){
   el.innerHTML=`
    ${DV.busy?`<p class="trerr" role="status">${esc(DV.busy)}</p>`:""}${DV.msg?`<p class="trerr" role="alert">${esc(DV.msg)}</p>`:""}
    <section class="sec trbox"><h2>יעדי קבלה</h2>${acceptance()}<div class="row"><button class="btn small" id="dv-copy">להעתיק דוח מלא</button><button class="btn small" id="dv-save">לשמור דוח כקובץ</button></div><pre id="dv-copied" class="trpre" hidden></pre></section>
-   <section class="sec"><h2>ערכת הבדיקה: 10 מנגינות</h2><p class="note-text">מנגנים על גיטרה אמיתית, בלי תיקונים. מתחת לכל תו כתוב מיתר:סריג, ו-0 הוא מיתר פתוח. אפשר להקליט כאן, או להקליט באפליקציית הקלטה ולהעלות את הקובץ. אין צורך במטרונום, כי הקצב נמדד מתוך הנגינה.</p><div class="kitgrid">${core.map(kitCard).join("")}</div></section>
+   <section class="sec"><h2>ערכת הבדיקה: 10 מנגינות</h2><p class="note-text">כל מנגינה מנגנים <b>פעם אחת בלבד</b>, על גיטרה אמיתית ובלי תיקונים, ולוחצים "עצור" מיד אחרי התו האחרון. הטלפון כ-15 ס"מ מהגיטרה. מתחת לכל תו כתוב מיתר:סריג, ו-0 הוא מיתר פתוח. אפשר להקליט כאן, או להקליט באפליקציית הקלטה ולהעלות את הקובץ. אין צורך במטרונום, כי הקצב נמדד מתוך הנגינה.</p><div class="kitgrid">${core.map(kitCard).join("")}</div></section>
    <section class="sec"><h2>בדיקות קשות</h2><div class="kitgrid">${extra.map(kitCard).join("")}</div></section>
    <section class="sec"><h2>הקלטות שאינן מתאימות</h2><div class="kitgrid">${un.map(kitCard).join("")}</div></section>
    <section class="sec trbox"><h2>בדיקה של קבצים משלכם</h2>
@@ -2101,6 +2113,20 @@ async function devPage(){
     <div id="dv-main" class="sec"></div></main>`);
   try{DV.takes=await Store.all("takes");DV.runs=await Store.all("runs")}catch(e){DV.msg="הדפדפן הזה לא מאפשר לשמור תוצאות."}
   drawDev();
+}
+function wavBlob(pcm,sr){
+  const b=new ArrayBuffer(44+pcm.length*2),v=new DataView(b),w=(o,s)=>{for(let i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i))};
+  w(0,"RIFF");v.setUint32(4,36+pcm.length*2,true);w(8,"WAVEfmt ");v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);v.setUint32(24,sr,true);v.setUint32(28,sr*2,true);v.setUint16(32,2,true);v.setUint16(34,16,true);w(36,"data");v.setUint32(40,pcm.length*2,true);
+  new Int16Array(b,44).set(pcm);return new Blob([b],{type:"audio/wav"});
+}
+async function saveWav(t){
+  const name=`piki-${t.kit}-${t.when.slice(0,19).replace(/[:T]/g,"-")}.wav`,blob=wavBlob(t.pcm,22050);
+  if(inFrame){DV.msg="שמירת הקלטה עובדת רק בחלון העצמאי.";drawDev();return}
+  try{
+    const file=new File([blob],name,{type:"audio/wav"});
+    if(navigator.canShare&&navigator.canShare({files:[file]})){await navigator.share({files:[file]});return}
+  }catch(e){if(e&&e.name==="AbortError")return}
+  const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=name;document.body.appendChild(a);a.click();a.remove();
 }
 function reportText(){
   return JSON.stringify({engine:Transcriber.VERSION,device:navigator.userAgent,created:new Date().toISOString(),takes:DV.takes.map(({pcm,...t})=>t),runs:DV.runs,mic:MC.log,facts:MC.facts},null,1);
@@ -2170,6 +2196,7 @@ app.addEventListener("click",async e=>{
     }catch(err){DV.msg=micErrorText(err)+" בינתיים אפשר להקליט באפליקציית הקלטה ולהעלות את הקובץ.";drawDev()}
   }
   else if(b.id==="kit-stop"&&DV.rec)DV.rec.r.stop();
+  else if(b.dataset.takewav){const t=DV.takes.find(q=>q.id===b.dataset.takewav);if(t)saveWav(t)}
   else if(b.dataset.takeopen){DV.open=DV.open===b.dataset.takeopen?null:b.dataset.takeopen;drawDev()}
   else if(b.dataset.takedel){await Store.del("takes",b.dataset.takedel).catch(()=>{});DV.takes=DV.takes.filter(t=>t.id!==b.dataset.takedel);DV.open=null;drawDev()}
   else if(b.id==="dv-run"){if(!DV.batch.audio.length){DV.msg="בחרו קודם הקלטות וקובצי תווים.";drawDev();return}batchRun(document.getElementById("dv-engine").value)}
