@@ -882,8 +882,8 @@ const Transcriber=(()=>{
 
   function verdictOf(st,warnings,notes){
     if(!notes.length)return"unsuitable";
-    if(st.low>=.7||(st.aper>=.5&&st.low>=.35)||st.dev>=.16)return"unsuitable";
-    if(st.low>=.35)return"doubtful";
+    if(st.low>=.7||(st.aper>=.5&&st.low>=.35)||(st.dev>=.2&&st.low>=.3)||st.dev>=.24)return"unsuitable";
+    if(st.low>=.4||st.dev>=.2||(st.low>=.35&&st.rate>=1.8))return"doubtful";
     return"ok";
   }
   /* samples: mono Float32Array in any sample rate. Returns notes in SOUNDING MIDI numbers. */
@@ -1192,6 +1192,19 @@ const Transcriber=(()=>{
       const r=notes[i],a=notes[i-1],b=notes[i+1];
       if(r.cut.kind!=="onset"&&(r.t1-r.t0<.11||(r.t1-r.t0<.2&&r.iqr>.3))&&r.midi>Math.min(a.midi,b.midi)&&r.midi<Math.max(a.midi,b.midi)){a.t1=r.t1;notes.splice(i,1)}
     }
+    /* Sounds of the hands, not plucks: a pick touching a string, a finger lifted or moved along the neck.
+       They are quiet, their own harmonics do not grow and the phases of the partials do not reset. */
+    {
+      const pkM=median(notes.map(q=>q.pk));
+      for(let i=notes.length-1;i>=1;i--){
+        const r=notes[i];if(r.cut.kind!=="onset"||r.pk>=.7*pkM)continue;
+        /* a slide also lacks an attack, but it stays loud, lasts and moves only a little */
+        const step=Math.abs(r.midi-notes[i-1].midi);
+        if(r.pk>=.3*pkM&&r.t1-r.t0>=.2&&step>=1&&step<=4)continue;
+        const f=Math.max(0,Math.round((r.t0*SR-FCENTER)/HOP));
+        if(combRise(f,r.midi)<2.6&&phaseBreak(f,r.midi)<.55){notes[i-1].t1=Math.max(notes[i-1].t1,r.t1);notes.splice(i,1)}
+      }
+    }
     /* drop noise and blips */
     let out=notes.filter(r=>{
       const dur=r.t1-r.t0;
@@ -1202,7 +1215,7 @@ const Transcriber=(()=>{
       const dur=Math.max(.03,r.t1-r.t0);
       const periodic=clamp01(1-r.ap/.32),steady=clamp01(1-r.iqr/.55),center=clamp01(1-Math.abs(r.dev)/.5),length=clamp01(dur/.11);
       let conf=.42*periodic+.2*steady+.23*center+.15*length;
-      return{midi:r.midi,t0:+r.t0.toFixed(3),dur:+dur.toFixed(3),conf:+conf.toFixed(2),cents:Math.round(r.dev*100),soft:r.cut.kind!=="onset"};
+      return{midi:r.midi,t0:+r.t0.toFixed(3),dur:+dur.toFixed(3),conf:+conf.toFixed(2),cents:Math.round(r.dev*100),soft:r.cut.kind!=="onset",_s:r.cut.kind==="onset"?r.cut.s/sMaxD:0};
     });
     if(!out.length){warnings.push("noPitch");return empty}
 
@@ -1215,6 +1228,13 @@ const Transcriber=(()=>{
     const kept=notes.filter(r=>r.h!=null);
     const avg=(a,g)=>a.length?a.reduce((v,o)=>v+g(o),0)/a.length:0;
     const stats={aper:act?+(bad/act).toFixed(2):0,h:+avg(kept,r=>r.h).toFixed(2),dev:+avg(kept,r=>Math.abs(r.dev||0)).toFixed(2),iqr:+avg(kept,r=>r.iqr).toFixed(2),low:+avg(out,o=>o.conf<.75?1:0).toFixed(2),rate:+(out.length/Math.max(.5,samples.length/sampleRate)).toFixed(1)};
+    /* Short, unsure notes are almost always hand noise or a buzzing fret, not plucks. They are left out of the result. */
+    const HC=typeof HIDE_CONF!=="undefined"?HIDE_CONF:.75,HD=typeof HIDE_DUR!=="undefined"?HIDE_DUR:.45;
+    const HS=typeof HIDE_S!=="undefined"?HIDE_S:.6,hide=o=>o.conf<HC&&o.dur<HD&&o._s<HS;
+    const hidden=out.filter(hide);
+    if(hidden.length&&hidden.length<out.length)out=out.filter(o=>!hide(o));
+    out.forEach(o=>delete o._s);
+    stats.hidden=hidden.length;
     /* rests */
     const rests=[];
     for(let i=1;i<out.length;i++){const a=out[i-1],gap=out[i].t0-(a.t0+a.dur);if(gap>=.09)rests.push({t0:+(a.t0+a.dur).toFixed(3),dur:+gap.toFixed(3)})}
@@ -1244,7 +1264,7 @@ const Transcriber=(()=>{
     }
     return{right,wrong,missing,extra,octave,total:m,score:m?right/(m+extra):0,trail};
   }
-  return{transcribe,compare,resample,SR,VERSION:"0.3"};
+  return{transcribe,compare,resample,SR,VERSION:"0.5"};
 })();
 
 /* ---------- accuracy metrics: pure functions shared by the test tools and the developer screen ---------- */
@@ -2034,6 +2054,885 @@ const TranscriberV02=(()=>{
   return{transcribe,compare,resample,SR,VERSION:"0.2"};
 })();
 
+/* ---------- melody transcription engine: one voice, clean guitar. No DOM, no audio APIs. ---------- */
+const TranscriberV03=(()=>{
+  const SR=22050,HOP=256,INT=1024,TMIN=Math.floor(SR/1400),TMAX=Math.ceil(SR/72),PW=INT+TMAX,FW=1024;
+  const PCENTER=PW/2,FCENTER=FW/2;
+  const median=a=>{if(!a.length)return NaN;const s=[...a].sort((x,y)=>x-y),m=s.length>>1;return s.length%2?s[m]:(s[m-1]+s[m])/2};
+  const quant=(a,q)=>{if(!a.length)return NaN;const s=[...a].sort((x,y)=>x-y);return s[Math.min(s.length-1,Math.floor(q*s.length))]};
+  const clamp01=v=>Math.max(0,Math.min(1,v));
+  const dB=v=>Math.pow(10,v/20);
+
+  function resample(x,from,to){
+    if(from===to)return Float32Array.from(x);
+    const r=to/from,cut=Math.min(1,r)*.92,scale=r<1?r:1,half=14,RES=128,tl=half*RES*2+2,tb=new Float32Array(tl);
+    for(let i=0;i<tl;i++){const d=(i/RES-half),a=Math.PI*d*cut,sinc=Math.abs(a)<1e-6?1:Math.sin(a)/a;tb[i]=Math.abs(d)<half?sinc*(.5+.5*Math.cos(Math.PI*d/half)):0}
+    const n=Math.floor(x.length*r),out=new Float32Array(n),width=half/scale;
+    for(let i=0;i<n;i++){
+      const c=i/r,lo=Math.max(0,Math.ceil(c-width)),hi=Math.min(x.length-1,Math.floor(c+width));let s=0;
+      for(let j=lo;j<=hi;j++){s+=x[j]*tb[Math.round(((j-c)*scale+half)*RES)]}
+      out[i]=s*cut*scale;
+    }
+    return out;
+  }
+  function fft(re,im){
+    const n=re.length;
+    for(let i=1,j=0;i<n;i++){let b=n>>1;for(;j&b;b>>=1)j^=b;j^=b;if(i<j){[re[i],re[j]]=[re[j],re[i]];[im[i],im[j]]=[im[j],im[i]]}}
+    for(let l=2;l<=n;l<<=1){
+      const a=-2*Math.PI/l,wr=Math.cos(a),wi=Math.sin(a);
+      for(let i=0;i<n;i+=l){let cr=1,ci=0;for(let k=0;k<l/2;k++){
+        const u=i+k,v=u+l/2,tr=re[v]*cr-im[v]*ci,ti=re[v]*ci+im[v]*cr;
+        re[v]=re[u]-tr;im[v]=im[u]-ti;re[u]+=tr;im[u]+=ti;
+        const t=cr*wr-ci*wi;ci=cr*wi+ci*wr;cr=t}}
+    }
+  }
+  /* YIN difference function, returned as cumulative mean normalized values with candidate dips */
+  function yinFrame(x,start,d){
+    let run=0;d[0]=1;
+    for(let t=1;t<=TMAX;t++){let s=0;for(let i=0;i<INT;i+=2){const v=x[start+i]-x[start+i+t];s+=v*v}run+=s;d[t]=run>0?s*t/run:1}
+    const c=[];
+    for(let t=Math.max(2,TMIN);t<TMAX;t++){
+      if(d[t]<.5&&d[t]<=d[t-1]&&d[t]<d[t+1]){
+        const a=d[t-1],b=d[t],e=d[t+1],den=a-2*b+e,sh=den>0?Math.max(-1,Math.min(1,(a-e)/(2*den))):0;
+        c.push({tau:t+sh,d:b});
+      }
+    }
+    return c;
+  }
+  function estimateTempo(onsets){
+    if(onsets.length<3)return{bpm:null,conf:0};
+    const iois=[];for(let i=1;i<onsets.length;i++)iois.push(onsets[i]-onsets[i-1]);
+    let best=null,second=null;
+    for(let bpm=50;bpm<=200;bpm++){
+      const beat=60/bpm;let err=0,comp=0;
+      for(const v of iois){
+        const r8=v/(beat/2),n8=Math.max(1,Math.round(r8)),e8=Math.abs(r8-n8)/2;
+        const r16=v/(beat/4),n16=Math.max(1,Math.round(r16)),e16=Math.abs(r16-n16)/4;
+        const use16=e16<e8*.45;err+=use16?e16:e8;comp+=use16?1:(n8%2?0:-.15);
+      }
+      const prior=Math.pow(Math.log2(bpm/100),2);
+      const score=err/iois.length+.012*comp/iois.length+.012*prior;
+      const o={bpm,score};
+      if(!best||score<best.score){if(best&&Math.abs(best.bpm-bpm)>4)second=best;best=o}
+      else if((!second||score<second.score)&&Math.abs(best.bpm-bpm)>4)second=o;
+    }
+    const margin=second?clamp01((second.score-best.score)/.03):1,fit=clamp01(1-best.score/.09);
+    return{bpm:best.bpm,conf:clamp01(.6*fit+.4*margin)*(onsets.length>=6?1:.6)};
+  }
+
+  function verdictOf(st,warnings,notes){
+    if(!notes.length)return"unsuitable";
+    if(st.low>=.7||(st.aper>=.5&&st.low>=.35)||st.dev>=.16)return"unsuitable";
+    if(st.low>=.35)return"doubtful";
+    return"ok";
+  }
+  /* samples: mono Float32Array in any sample rate. Returns notes in SOUNDING MIDI numbers. */
+  async function transcribe(samples,sampleRate,opts){
+    opts=opts||{};
+    const prog=opts.onProgress||(()=>{}),yieldNow=opts.yield||(()=>Promise.resolve());
+    let x=resample(samples,sampleRate,SR);
+    /* DC and rumble removal, loudness normalize */
+    {let y=0,px=0;const a=.982;for(let i=0;i<x.length;i++){const v=x[i];y=a*(y+v-px);px=v;x[i]=y}}
+    let peak=0;for(let i=0;i<x.length;i++){const a=Math.abs(x[i]);if(a>peak)peak=a}
+    const warnings=[],empty={verdict:"unsuitable",stats:null,notes:[],rests:[],bpm:null,bpmConf:0,tuningCents:0,confidence:0,warnings};
+    if(peak<.004){warnings.push("silence");return empty}
+    let clip=0;for(let i=0;i<samples.length;i+=3)if(Math.abs(samples[i])>.985)clip++;
+    if(clip/(samples.length/3)>.002)warnings.push("clipping");
+    for(let i=0;i<x.length;i++)x[i]/=peak;
+    pad:{const p=new Float32Array(x.length+PW+FW);p.set(x);x=p}
+    const n=Math.max(0,Math.floor((x.length-PW-FW)/HOP));
+    if(n<8){warnings.push("tooShort");return empty}
+
+    /* per frame loudness and spectral flux */
+    const rms=new Float32Array(n),flux=new Float32Array(n),re=new Float64Array(FW),im=new Float64Array(FW),hann=new Float64Array(FW);
+    for(let i=0;i<FW;i++)hann[i]=.5-.5*Math.cos(2*Math.PI*i/(FW-1));
+    let prev=new Float64Array(FW/2),cur=new Float64Array(FW/2);
+    const binLo=Math.floor(70/SR*FW);
+    for(let f=0;f<n;f++){
+      const st=f*HOP;let e=0;
+      for(let i=0;i<FW;i++){const v=x[st+i];e+=v*v;re[i]=v*hann[i];im[i]=0}
+      rms[f]=Math.sqrt(e/FW);fft(re,im);
+      let fl=0;for(let b=binLo;b<FW/2;b++){const m=Math.log1p(60*Math.hypot(re[b],im[b]));cur[b]=m;const dd=m-prev[b];if(dd>0)fl+=dd}
+      flux[f]=fl;[prev,cur]=[cur,prev];
+      if(f%400===0){prog(.25*f/n);await yieldNow()}
+    }
+    flux[0]=0;
+    const sortedR=[...rms].sort((a,b)=>a-b),floor=sortedR[Math.floor(n*.1)],top=sortedR[Math.floor(n*.98)]||peak;
+    const gate=Math.max(floor*2.2,top*dB(-42));
+    if(top<floor*3&&floor>.02)warnings.push("noisy");
+
+    const fT=f=>(f*HOP+FCENTER)/SR,pT=f=>(f*HOP+PCENTER)/SR;
+    /* onset picking from flux */
+    const onsetS=[];
+    {
+      const fl=[...flux].filter(v=>v>0).sort((a,b)=>a-b),hi=fl[Math.floor(fl.length*.97)]||1;
+      const win=Math.round(.14*SR/HOP),minGap=Math.round(.055*SR/HOP);let lastF=-99;
+      for(let f=2;f<n-2;f++){
+        if(!(flux[f]>=flux[f-1]&&flux[f]>flux[f+1]))continue;
+        let s=0,c=0;for(let j=Math.max(0,f-win);j<=Math.min(n-1,f+win);j++){s+=flux[j];c++}
+        const thr=Math.max(.11*hi,1.22*s/c);
+        if(flux[f]<thr)continue;
+        const after=Math.max(rms[f],rms[Math.min(n-1,f+3)],rms[Math.min(n-1,f+6)]);
+        if(after<gate)continue;
+        if(f-lastF<minGap){if(flux[f]>onsetS[onsetS.length-1].s){onsetS[onsetS.length-1]={t:fT(f),s:flux[f],f};lastF=f}continue}
+        onsetS.push({t:fT(f),s:flux[f],f});lastF=f;
+      }
+    }
+
+    const free=new Uint8Array(n+8);
+    for(const o of onsetS){const pf=Math.round((o.t*SR-PCENTER)/HOP);for(let j=pf;j<=pf+6;j++)if(j>=0&&j<n)free[j]=1}
+    /* pitch candidates per frame, then Viterbi smoothing */
+    const d=new Float32Array(TMAX+2),cands=new Array(n);
+    for(let f=0;f<n;f++){
+      const loud=Math.min(rms[f],rms[Math.min(n-1,f+2)]);
+      cands[f]=loud>=gate*.55?yinFrame(x,f*HOP,d):[];
+      if(f%60===0){prog(.25+.6*f/n);await yieldNow()}
+    }
+    const pitchFrame=new Float32Array(n).fill(NaN),aper=new Float32Array(n).fill(1);
+    {
+      const ln=t=>Math.log2(t);let scores=[],back=[],last=null;
+      const flush=(from,to)=>{
+        if(!scores.length)return;
+        let k=0;const end=scores[scores.length-1];for(let j=1;j<end.length;j++)if(end[j]<end[k])k=j;
+        for(let f=to;f>=from;f--){const c=cands[f][k];pitchFrame[f]=SR/c.tau;aper[f]=c.d;k=back[f-from][k]}
+        scores=[];back=[];
+      };
+      let from=-1;
+      for(let f=0;f<n;f++){
+        const c=cands[f];
+        if(!c.length){if(from>=0)flush(from,f-1);from=-1;last=null;continue}
+        if(from<0)from=f;
+        const local=c.map(o=>o.d+.05*ln(o.tau/TMIN));
+        if(!last){scores.push(local);back.push(c.map(()=>0))}
+        else{
+          const pv=scores[scores.length-1],b=[],s=[];
+          for(let i=0;i<c.length;i++){
+            let bs=Infinity,bi=0;
+            for(let j=0;j<last.length;j++){
+              const v=pv[j]+(free[f]?.02:1)*Math.min(.28,1.6*Math.abs(ln(c[i].tau/last[j].tau)));
+              if(v<bs){bs=v;bi=j}
+            }
+            s.push(bs+local[i]);b.push(bi);
+          }
+          scores.push(s);back.push(b);
+        }
+        last=c;
+      }
+      if(from>=0)flush(from,n-1);
+    }
+    prog(.88);await yieldNow();
+
+    const pitch=new Float32Array(n).fill(NaN);
+    for(let f=0;f<n;f++)if(pitchFrame[f]>0&&aper[f]<.42)pitch[f]=69+12*Math.log2(pitchFrame[f]/440);
+
+    /* cut points: onsets plus stable pitch steps without an attack (hammer-on, slide) */
+    const onsetFrames=onsetS.map(o=>({pf:Math.max(0,Math.round((o.t*SR-PCENTER)/HOP)),t:o.t,s:o.s,kind:"onset"}));
+    const smooth=new Float32Array(n).fill(NaN);
+    for(let f=2;f<n-2;f++){const a=[];for(let j=f-2;j<=f+2;j++)if(!isNaN(pitch[j]))a.push(pitch[j]);if(a.length>=3)smooth[f]=median(a)}
+    const cuts=[...onsetFrames];
+    {
+      let i=0;
+      for(let c=0;c<=onsetFrames.length;c++){
+        const lo=c===0?0:onsetFrames[c-1].pf,hi=c<onsetFrames.length?onsetFrames[c].pf:n;
+        let curP=NaN,hold=0,startF=lo;
+        for(i=lo;i<hi;i++){
+          const p=smooth[i];if(isNaN(p))continue;
+          if(isNaN(curP)){curP=p;hold=0;continue}
+          if(Math.abs(p-curP)>.72){
+            hold++;
+            if(hold===1)startF=i;
+            if(hold>=6){cuts.push({pf:startF,t:pT(startF),s:0,kind:"pitch"});curP=p;hold=0}
+          }else{hold=0;curP=curP*.9+p*.1}
+        }
+      }
+    }
+    /* active regions that begin without a detected onset still count */
+    for(let f=1;f<n;f++){
+      if(rms[f]>=gate&&rms[f-1]<gate&&!cuts.some(c=>Math.abs(c.pf-f)<10))cuts.push({pf:f,t:fT(f),s:0,kind:"level"});
+    }
+    cuts.sort((a,b)=>a.t-b.t);
+
+    /* energy at the harmonics of one pitch, in a window that starts at a frame: ringing notes of another pitch hardly touch it */
+    const specAt=(f,size)=>{
+      const N=size,rr=new Float64Array(N),ii=new Float64Array(N),st=Math.max(0,f*HOP);
+      for(let i=0;i<N;i++){const v=st+i<x.length?x[st+i]:0;rr[i]=v*(.5-.5*Math.cos(2*Math.PI*i/(N-1)))}
+      fft(rr,ii);const mag=new Float64Array(N/2);for(let b=0;b<N/2;b++)mag[b]=Math.hypot(rr[b],ii[b]);return mag};
+    const comb=(mag,midi)=>{const N=mag.length*2,fq=440*Math.pow(2,(midi-69)/12);let e=0;
+      for(let h=1;h<=6;h++){const b=Math.round(h*fq*N/SR);if(b>=mag.length-1)break;e+=Math.max(mag[b-1]||0,mag[b],mag[b+1])/Math.sqrt(h)}return e};
+    const combRise=(f,midi)=>{
+      const before=comb(specAt(Math.max(0,f-5),1024),midi);
+      let after=0;for(const k of[0,1,2,3])after=Math.max(after,comb(specAt(f+k,1024),midi));
+      return after/(before+1e-6)};
+    /* pitch of whatever was just plucked, read from the growth of the spectrum */
+    const attackPitch=f=>{
+      const a=specAt(Math.max(0,f-8),2048);let b=null;
+      for(const k of[0,2]){const s=specAt(f+k,2048);if(!b)b=s.slice();else for(let i=0;i<b.length;i++)b[i]=Math.max(b[i],s[i])}
+      const dif=b.map((v,i)=>Math.max(0,v-a[i]));
+      let best=null,bs=0;
+      for(let m=38;m<=91;m++){
+        const fq=440*Math.pow(2,(m-69)/12),N=2048;let e=0,odd=0;
+        for(let h=1;h<=6;h++){const bn=Math.round(h*fq*N/SR);if(bn>=dif.length-1)break;const v=Math.max(dif[bn-1],dif[bn],dif[bn+1])/Math.sqrt(h);e+=v;if(h%2)odd+=v}
+        const s=Math.min(e,odd*2.6);if(s>bs){bs=s;best=m}
+      }
+      return best};
+
+    /* a new pluck resets the phases of the partials, even when it is softer than the ringing note */
+    const cplx=(f)=>{const N=1024,rr=new Float64Array(N),ii=new Float64Array(N),st=Math.max(0,f*HOP);for(let i=0;i<N;i++){const v=st+i<x.length?x[st+i]:0;rr[i]=v*hann[i]}fft(rr,ii);return{rr,ii}};
+    const phaseBreak=(f,midi)=>{
+      const fq=440*Math.pow(2,(midi-69)/12);let peak=0;
+      for(let k=-1;k<=3;k++){
+        const a=cplx(f+k-2),b=cplx(f+k-1),c=cplx(f+k);let dev=0,tot=0;
+        for(let h=1;h<=5;h++){
+          const bn=Math.round(h*fq*1024/SR);if(bn>=511)break;
+          const pa=Math.atan2(a.ii[bn],a.rr[bn]),pb=Math.atan2(b.ii[bn],b.rr[bn]),mb=Math.hypot(b.rr[bn],b.ii[bn]),ang=2*pb-pa;
+          const dr=c.rr[bn]-mb*Math.cos(ang),di=c.ii[bn]-mb*Math.sin(ang);dev+=Math.hypot(dr,di);tot+=Math.hypot(c.rr[bn],c.ii[bn])+mb;
+        }
+        if(tot>0)peak=Math.max(peak,dev/tot);
+      }
+      return peak};
+    /* how much of the sound sits on the harmonics of the pitch: plucks are high, squeaks and noise are low */
+    const harmonicity=(f,midi,size)=>{size=size||2048;const mag=specAt(f,size),fq=440*Math.pow(2,(midi-69)/12);let on=0,all=0;const lo=Math.floor(70*size/SR),hi=Math.floor(5000*size/SR),wd=size>1024?2:1;
+      for(let b=lo;b<hi;b++)all+=mag[b]*mag[b];
+      for(let h=1;h<=12;h++){const c=Math.round(h*fq*size/SR);if(c+wd>=hi)break;for(let d=-wd;d<=wd;d++)on+=mag[c+d]*mag[c+d]}
+      return all?on/all:0};
+
+    const sMaxD=Math.max(1e-6,...onsetS.map(o=>o.s));
+    let actB=0,badB=0;for(let f=0;f<n;f++)if(rms[f]>=gate*1.5){actB++;if(!(aper[f]<.3))badB++}
+    const badFrac=actB?badB/actB:0;
+    /* build notes */
+    let raw=[];
+    for(let c=0;c<cuts.length;c++){
+      const cut=cuts[c],nextF=c+1<cuts.length?cuts[c+1].pf:n;
+      const skip=Math.ceil((.022+PCENTER/SR*.55)*SR/HOP);
+      const st=cut.pf+(cut.kind==="pitch"?2:skip),lim=Math.min(n,nextF+1);
+      let pk=0;for(let f=cut.pf;f<Math.min(lim,cut.pf+Math.round(.15*SR/HOP));f++)if(rms[f]>pk)pk=rms[f];
+      if(pk<gate)continue;
+      const endThr=Math.max(gate,pk*dB(-30));
+      let end=lim-1;for(let f=Math.min(lim-1,cut.pf+3);f<lim;f++){if(rms[f]<endThr){end=f;break}}
+      const ps=[],ap=[];
+      for(let f=Math.min(st,end);f<=Math.min(end,lim-1);f++)if(!isNaN(pitch[f])){ps.push(pitch[f]);ap.push(aper[f])}
+      /* very short notes: take what exists, the window edge overlaps the attack */
+      if(ps.length<3){
+        for(let f=cut.pf;f<=end;f++)if(!isNaN(pitch[f])){ps.push(pitch[f]);ap.push(aper[f])}
+      }
+      if(ps.length<2){
+        if(badFrac>=.2&&cut.kind==="onset"&&cut.s>=.33*sMaxD){
+          const m=attackPitch(Math.max(0,Math.round((cut.t*SR-FCENTER)/HOP)));
+          if(m!=null)raw.push({t0:cut.t,t1:fT(end),p:m,iqr:.3,ap:.15,pk,cut,frames:2,sn:Math.floor(pT(cut.pf)*SR),en:Math.floor(pT(end)*SR+PCENTER)});
+        }
+        continue;
+      }
+      const p=median(ps),iqr=quant(ps,.75)-quant(ps,.25);
+      raw.push({t0:cut.t,t1:fT(end),p,iqr,ap:median(ap),pk,cut,frames:ps.length,sn:Math.floor(pT(st)*SR-PCENTER),en:Math.floor(pT(end)*SR+PCENTER)});
+    }
+    {
+      const kept=[];
+      for(let i=0;i<raw.length;i++){
+        const r=raw[i],nx=raw[i+1];
+        const pr=kept[kept.length-1],ringing=pr&&Math.abs(r.p-pr.p)<.5;
+        if(nx&&r.cut.kind!=="pitch"&&nx.cut.kind==="pitch"&&nx.t0-r.t0<(ringing?.3:.13)){nx.t0=r.t0;nx.cut={...nx.cut,kind:r.cut.kind,s:r.cut.s,pf:r.cut.pf};continue}
+        kept.push(r);
+      }
+      raw=kept;
+    }
+    if(!raw.length){warnings.push("noPitch");return empty}
+
+    /* tuning of the instrument: circular median of the deviation from equal temperament */
+    let tune=0;{
+      const devs=raw.filter(r=>r.frames>=6).map(r=>r.p-Math.round(r.p));
+      if(devs.length){const cand=[...devs].sort((a,b)=>a-b);tune=median(cand);if(Math.abs(tune)>.45)tune=0}
+    }
+    /* octave errors are handled in three places: the pitch path prefers the shortest period that fits,
+       it may jump freely only at attacks, and pitch flips by 12, 19 or 24 semitones without an attack are merged below. */
+    for(const r of raw){r.midi=Math.round(r.p-tune);r.dev=r.p-tune-r.midi}
+    /* Open strings that keep ringing make the recording aperiodic. Only then the attack overrides the steady pitch reading. */
+    let actE=0,badE=0;for(let f=0;f<n;f++)if(rms[f]>=gate*1.5){actE++;if(!(aper[f]<.3))badE++}
+    const attackMode=actE>0&&badE/actE>=.2;
+    if(attackMode)    /* The attack decides. A pluck is recognised by the growth of the spectrum, and that growth also names the new note,
+       while open strings keep ringing and the steady pitch reading follows them or a period they share. */
+    {
+      const kept=[];
+      const support=(f,m)=>{for(let k=f;k<Math.min(n,f+12);k++){for(const c of cands[k]||[]){const q=69+12*Math.log2(SR/c.tau/440);if(Math.abs(q-m)<.45&&c.d<.5)return true}}return false};
+      for(const r of raw){
+        if(r.cut.kind!=="onset"){kept.push(r);continue}
+        const f=Math.max(0,Math.round((r.t0*SR-FCENTER)/HOP)),sRel=r.cut.s/sMaxD;
+        let m=attackPitch(f),rise=m!=null?combRise(f,m):0;
+        r.strong=sRel>=.33||(sRel>=.2&&rise>=3);
+        const q=kept[kept.length-1];
+        if(!r.strong&&q&&r.t0-q.t1<.25){
+          const samePitch=Math.round(r.p-tune)===q.midi,pb=samePitch&&sRel>=.18?phaseBreak(f,q.midi):0;
+          if(!(samePitch&&pb>=.3)){q.t1=Math.max(q.t1,r.t1);continue}
+        }
+        let after=0;for(let k=1;k<=5;k++)after=Math.max(after,rms[Math.min(n-1,f+k)]);
+        const ringing=rms[Math.max(0,f-3)]>=.12*after;
+        if(r.strong&&ringing&&m!=null&&m!==r.midi){
+          if(!support(f,m)&&support(f,m-12))m-=12;
+          const prevSame=q&&r.midi===q.midi,sub=[12,19,24].includes(m-r.midi),unsure=r.ap>.22;
+          if(m!==r.midi&&(prevSame||sub||unsure)){
+            r.midi=m;r.dev=0;const sure=rise>=4;r.ap=sure?.06:.12;r.iqr=sure?.15:.3;r.fromAttack=true;
+          }
+        }
+        kept.push(r);
+      }
+      raw=kept;
+    }
+    else{
+    /* over a ringing string the pitch reading can follow the old note or a shared period. What grew at the attack is the new note. */
+    for(let i=1;i<raw.length;i++){
+      const r=raw[i],q=raw[i-1];
+      if(r.cut.kind!=="onset"||r.t0-q.t1>.12)continue;
+      const f=Math.max(0,Math.round((r.t0*SR-FCENTER)/HOP)),here=combRise(f,r.midi);
+      if(r.midi===q.midi&&here>=1.12)continue;
+      if(r.midi!==q.midi){
+        const b4=comb(specAt(Math.max(0,f-5),1024),q.midi),now=comb(specAt(f+1,1024),q.midi);
+        if(here>=2.2||b4<=0||now<.45*b4)continue;
+      }
+      const m=attackPitch(f);if(m==null||m===r.midi)continue;
+      const there=combRise(f,m);
+      if(there>2&&there>here*(r.midi===q.midi?1.6:2.6)){r.midi=m;r.dev=0;r.ap=Math.max(r.ap,.12);r.iqr=Math.max(r.iqr,.3);r.fromAttack=true}
+    }
+    }
+    /* noise notes: a squeak or a scrape has hardly any energy on harmonics. An attack can still reveal the plucked pitch. */
+    {
+      const pass=[];
+      for(const r of raw){
+        const f=Math.max(0,Math.round((r.t0*SR-FCENTER)/HOP));
+        const size=r.t1-r.t0<.2?1024:2048;
+        r.h=harmonicity(f+2,r.midi,size);
+        if(r.h<(size<2048?.3:.35)&&!(attackMode&&r.fromAttack)){
+          if(r.cut.kind!=="onset"||r.cut.s<.25*sMaxD)continue;
+          const m=attackPitch(f);
+          if(m==null||harmonicity(f+2,m,size)<.5)continue;
+          r.midi=m;r.dev=0;r.h=harmonicity(f+2,m,size);r.fromAttack=true;r.iqr=Math.max(r.iqr,.3);
+        }
+        pass.push(r);
+      }
+      raw=pass;
+    }
+    /* merge fragments of one note */
+    const notes=[];
+    const strong=median(onsetS.map(o=>o.s))||1;const sMax=Math.max(1e-6,...onsetS.map(o=>o.s));
+    for(const r of raw){
+      const q=notes[notes.length-1];
+      if(q&&q.midi===r.midi&&(r.cut.kind==="onset"?r.t0-q.t1<.9:r.t0-q.t1<.06)){
+        const fi=r.cut.pf,before=rms[Math.max(0,fi-3)],after=Math.max(rms[Math.min(n-1,fi+3)],rms[Math.min(n-1,fi+6)]);
+        const rise=after/(before||1e-6);
+        const f0=Math.max(0,Math.round((r.t0*SR-FCENTER)/HOP)),on=r.cut.kind==="onset";
+        const sRel=r.cut.s/sMaxD,cr=on?combRise(f0,r.midi):0,cd=on&&sRel>=.18?phaseBreak(f0,r.midi):0;
+        const reattack=on&&((cd>=.38&&sRel>=.2&&(cr>=.95||cd>=.62))||(cd>=.18&&sRel>=.34)||(cr>=1.25&&sRel>=.26))||(r.strong&&sRel>=.33);
+        if(!reattack){q.t1=r.t1;q.frames+=r.frames;continue}
+      }
+      if(attackMode&&q&&r.cut.kind==="pitch"&&r.ap>.15&&combRise(Math.max(0,Math.round((r.t0*SR-FCENTER)/HOP)),r.midi)<1.25){q.t1=r.t1;q.frames+=r.frames;continue}
+      const weakOn=r.cut.kind==="onset"&&r.cut.s<.2*sMaxD;
+      if(q&&[12,19,24].includes(Math.abs(q.midi-r.midi))&&r.t0-q.t1<.06&&(r.cut.kind==="pitch"||(weakOn&&combRise(Math.max(0,Math.round((r.t0*SR-FCENTER)/HOP)),r.midi)<1.3))){if(r.frames>q.frames||(r.frames>=q.frames*.6&&r.midi>q.midi)){q.midi=r.midi;q.dev=r.dev;q.ap=r.ap;q.iqr=r.iqr}q.t1=r.t1;q.frames+=r.frames;continue}
+      notes.push(r);
+    }
+    /* notes passed on the way through a slide: no attack, short, strictly between their neighbours */
+    for(let i=notes.length-2;i>=1;i--){
+      const r=notes[i],a=notes[i-1],b=notes[i+1];
+      if(r.cut.kind!=="onset"&&(r.t1-r.t0<.11||(r.t1-r.t0<.2&&r.iqr>.3))&&r.midi>Math.min(a.midi,b.midi)&&r.midi<Math.max(a.midi,b.midi)){a.t1=r.t1;notes.splice(i,1)}
+    }
+    /* drop noise and blips */
+    let out=notes.filter(r=>{
+      const dur=r.t1-r.t0;
+      if(r.cut.kind!=="onset"&&dur<.07)return false;
+      if(dur<.035)return false;
+      return r.ap<.4;
+    }).map(r=>{
+      const dur=Math.max(.03,r.t1-r.t0);
+      const periodic=clamp01(1-r.ap/.32),steady=clamp01(1-r.iqr/.55),center=clamp01(1-Math.abs(r.dev)/.5),length=clamp01(dur/.11);
+      let conf=.42*periodic+.2*steady+.23*center+.15*length;
+      return{midi:r.midi,t0:+r.t0.toFixed(3),dur:+dur.toFixed(3),conf:+conf.toFixed(2),cents:Math.round(r.dev*100),soft:r.cut.kind!=="onset"};
+    });
+    if(!out.length){warnings.push("noPitch");return empty}
+
+    /* polyphony and range warnings */
+    let act=0,bad=0;for(let f=0;f<n;f++)if(rms[f]>=gate*1.5){act++;if(!(aper[f]<.3))bad++}
+    if(act&&bad/act>.4)warnings.push("polyphony");
+    if(out.some(o=>o.midi<38||o.midi>90))warnings.push("range");
+
+    /* can this recording be transcribed at all? */
+    const kept=notes.filter(r=>r.h!=null);
+    const avg=(a,g)=>a.length?a.reduce((v,o)=>v+g(o),0)/a.length:0;
+    const stats={aper:act?+(bad/act).toFixed(2):0,h:+avg(kept,r=>r.h).toFixed(2),dev:+avg(kept,r=>Math.abs(r.dev||0)).toFixed(2),iqr:+avg(kept,r=>r.iqr).toFixed(2),low:+avg(out,o=>o.conf<.75?1:0).toFixed(2),rate:+(out.length/Math.max(.5,samples.length/sampleRate)).toFixed(1)};
+    /* rests */
+    const rests=[];
+    for(let i=1;i<out.length;i++){const a=out[i-1],gap=out[i].t0-(a.t0+a.dur);if(gap>=.09)rests.push({t0:+(a.t0+a.dur).toFixed(3),dur:+gap.toFixed(3)})}
+
+    const tempo=estimateTempo(out.map(o=>o.t0));
+    if(tempo.bpm){const beat=60/tempo.bpm;out.forEach((o,i)=>{const nx=i+1<out.length?out[i+1].t0:o.t0+o.dur;o.beats=Math.max(.25,Math.round((nx-o.t0)/beat*4)/4)})}
+    const w=out.reduce((a,o)=>a+Math.min(1,o.dur),0)||1;
+    const confidence=+(out.reduce((a,o)=>a+o.conf*Math.min(1,o.dur),0)/w).toFixed(2);
+    prog(1);
+    return{stats,verdict:verdictOf(stats,warnings,out),notes:out,rests,bpm:tempo.bpm,bpmConf:+tempo.conf.toFixed(2),tuningCents:Math.round(tune*100),confidence,warnings,duration:samples.length/sampleRate};
+  }
+  /* Compare the notes the player really played with the transcription. Written expected notes may omit the octave. */
+  function compare(expected,got){
+    const m=expected.length,k=got.length,dp=[];
+    const eq=(e,g)=>e.pc===undefined?false:(e.midi!=null?e.midi===g:((g%12)+12)%12===e.pc);
+    for(let i=0;i<=m;i++){dp[i]=new Array(k+1).fill(0);dp[i][0]=i}
+    for(let j=0;j<=k;j++)dp[0][j]=j;
+    for(let i=1;i<=m;i++)for(let j=1;j<=k;j++)dp[i][j]=Math.min(dp[i-1][j]+1,dp[i][j-1]+1,dp[i-1][j-1]+(eq(expected[i-1],got[j-1])?0:1));
+    let i=m,j=k,right=0,wrong=0,missing=0,extra=0,octave=0;const trail=[];
+    while(i>0||j>0){
+      if(i>0&&j>0&&dp[i][j]===dp[i-1][j-1]+(eq(expected[i-1],got[j-1])?0:1)){
+        if(eq(expected[i-1],got[j-1])){right++;trail.unshift("ok")}
+        else{wrong++;if(expected[i-1].midi!=null&&((expected[i-1].midi-got[j-1])%12===0))octave++;trail.unshift("wrong")}
+        i--;j--;
+      }else if(i>0&&dp[i][j]===dp[i-1][j]+1){missing++;trail.unshift("missing");i--}
+      else{extra++;trail.unshift("extra");j--}
+    }
+    return{right,wrong,missing,extra,octave,total:m,score:m?right/(m+extra):0,trail};
+  }
+  return{transcribe,compare,resample,SR,VERSION:"0.3"};
+})();
+
+/* ---------- melody transcription engine: one voice, clean guitar. No DOM, no audio APIs. ---------- */
+const TranscriberV04=(()=>{
+  const SR=22050,HOP=256,INT=1024,TMIN=Math.floor(SR/1400),TMAX=Math.ceil(SR/72),PW=INT+TMAX,FW=1024;
+  const PCENTER=PW/2,FCENTER=FW/2;
+  const median=a=>{if(!a.length)return NaN;const s=[...a].sort((x,y)=>x-y),m=s.length>>1;return s.length%2?s[m]:(s[m-1]+s[m])/2};
+  const quant=(a,q)=>{if(!a.length)return NaN;const s=[...a].sort((x,y)=>x-y);return s[Math.min(s.length-1,Math.floor(q*s.length))]};
+  const clamp01=v=>Math.max(0,Math.min(1,v));
+  const dB=v=>Math.pow(10,v/20);
+
+  function resample(x,from,to){
+    if(from===to)return Float32Array.from(x);
+    const r=to/from,cut=Math.min(1,r)*.92,scale=r<1?r:1,half=14,RES=128,tl=half*RES*2+2,tb=new Float32Array(tl);
+    for(let i=0;i<tl;i++){const d=(i/RES-half),a=Math.PI*d*cut,sinc=Math.abs(a)<1e-6?1:Math.sin(a)/a;tb[i]=Math.abs(d)<half?sinc*(.5+.5*Math.cos(Math.PI*d/half)):0}
+    const n=Math.floor(x.length*r),out=new Float32Array(n),width=half/scale;
+    for(let i=0;i<n;i++){
+      const c=i/r,lo=Math.max(0,Math.ceil(c-width)),hi=Math.min(x.length-1,Math.floor(c+width));let s=0;
+      for(let j=lo;j<=hi;j++){s+=x[j]*tb[Math.round(((j-c)*scale+half)*RES)]}
+      out[i]=s*cut*scale;
+    }
+    return out;
+  }
+  function fft(re,im){
+    const n=re.length;
+    for(let i=1,j=0;i<n;i++){let b=n>>1;for(;j&b;b>>=1)j^=b;j^=b;if(i<j){[re[i],re[j]]=[re[j],re[i]];[im[i],im[j]]=[im[j],im[i]]}}
+    for(let l=2;l<=n;l<<=1){
+      const a=-2*Math.PI/l,wr=Math.cos(a),wi=Math.sin(a);
+      for(let i=0;i<n;i+=l){let cr=1,ci=0;for(let k=0;k<l/2;k++){
+        const u=i+k,v=u+l/2,tr=re[v]*cr-im[v]*ci,ti=re[v]*ci+im[v]*cr;
+        re[v]=re[u]-tr;im[v]=im[u]-ti;re[u]+=tr;im[u]+=ti;
+        const t=cr*wr-ci*wi;ci=cr*wi+ci*wr;cr=t}}
+    }
+  }
+  /* YIN difference function, returned as cumulative mean normalized values with candidate dips */
+  function yinFrame(x,start,d){
+    let run=0;d[0]=1;
+    for(let t=1;t<=TMAX;t++){let s=0;for(let i=0;i<INT;i+=2){const v=x[start+i]-x[start+i+t];s+=v*v}run+=s;d[t]=run>0?s*t/run:1}
+    const c=[];
+    for(let t=Math.max(2,TMIN);t<TMAX;t++){
+      if(d[t]<.5&&d[t]<=d[t-1]&&d[t]<d[t+1]){
+        const a=d[t-1],b=d[t],e=d[t+1],den=a-2*b+e,sh=den>0?Math.max(-1,Math.min(1,(a-e)/(2*den))):0;
+        c.push({tau:t+sh,d:b});
+      }
+    }
+    return c;
+  }
+  function estimateTempo(onsets){
+    if(onsets.length<3)return{bpm:null,conf:0};
+    const iois=[];for(let i=1;i<onsets.length;i++)iois.push(onsets[i]-onsets[i-1]);
+    let best=null,second=null;
+    for(let bpm=50;bpm<=200;bpm++){
+      const beat=60/bpm;let err=0,comp=0;
+      for(const v of iois){
+        const r8=v/(beat/2),n8=Math.max(1,Math.round(r8)),e8=Math.abs(r8-n8)/2;
+        const r16=v/(beat/4),n16=Math.max(1,Math.round(r16)),e16=Math.abs(r16-n16)/4;
+        const use16=e16<e8*.45;err+=use16?e16:e8;comp+=use16?1:(n8%2?0:-.15);
+      }
+      const prior=Math.pow(Math.log2(bpm/100),2);
+      const score=err/iois.length+.012*comp/iois.length+.012*prior;
+      const o={bpm,score};
+      if(!best||score<best.score){if(best&&Math.abs(best.bpm-bpm)>4)second=best;best=o}
+      else if((!second||score<second.score)&&Math.abs(best.bpm-bpm)>4)second=o;
+    }
+    const margin=second?clamp01((second.score-best.score)/.03):1,fit=clamp01(1-best.score/.09);
+    return{bpm:best.bpm,conf:clamp01(.6*fit+.4*margin)*(onsets.length>=6?1:.6)};
+  }
+
+  function verdictOf(st,warnings,notes){
+    if(!notes.length)return"unsuitable";
+    if(st.low>=.7||(st.aper>=.5&&st.low>=.35)||st.dev>=.16)return"unsuitable";
+    if(st.low>=.35)return"doubtful";
+    return"ok";
+  }
+  /* samples: mono Float32Array in any sample rate. Returns notes in SOUNDING MIDI numbers. */
+  async function transcribe(samples,sampleRate,opts){
+    opts=opts||{};
+    const prog=opts.onProgress||(()=>{}),yieldNow=opts.yield||(()=>Promise.resolve());
+    let x=resample(samples,sampleRate,SR);
+    /* DC and rumble removal, loudness normalize */
+    {let y=0,px=0;const a=.982;for(let i=0;i<x.length;i++){const v=x[i];y=a*(y+v-px);px=v;x[i]=y}}
+    let peak=0;for(let i=0;i<x.length;i++){const a=Math.abs(x[i]);if(a>peak)peak=a}
+    const warnings=[],empty={verdict:"unsuitable",stats:null,notes:[],rests:[],bpm:null,bpmConf:0,tuningCents:0,confidence:0,warnings};
+    if(peak<.004){warnings.push("silence");return empty}
+    let clip=0;for(let i=0;i<samples.length;i+=3)if(Math.abs(samples[i])>.985)clip++;
+    if(clip/(samples.length/3)>.002)warnings.push("clipping");
+    for(let i=0;i<x.length;i++)x[i]/=peak;
+    pad:{const p=new Float32Array(x.length+PW+FW);p.set(x);x=p}
+    const n=Math.max(0,Math.floor((x.length-PW-FW)/HOP));
+    if(n<8){warnings.push("tooShort");return empty}
+
+    /* per frame loudness and spectral flux */
+    const rms=new Float32Array(n),flux=new Float32Array(n),re=new Float64Array(FW),im=new Float64Array(FW),hann=new Float64Array(FW);
+    for(let i=0;i<FW;i++)hann[i]=.5-.5*Math.cos(2*Math.PI*i/(FW-1));
+    let prev=new Float64Array(FW/2),cur=new Float64Array(FW/2);
+    const binLo=Math.floor(70/SR*FW);
+    for(let f=0;f<n;f++){
+      const st=f*HOP;let e=0;
+      for(let i=0;i<FW;i++){const v=x[st+i];e+=v*v;re[i]=v*hann[i];im[i]=0}
+      rms[f]=Math.sqrt(e/FW);fft(re,im);
+      let fl=0;for(let b=binLo;b<FW/2;b++){const m=Math.log1p(60*Math.hypot(re[b],im[b]));cur[b]=m;const dd=m-prev[b];if(dd>0)fl+=dd}
+      flux[f]=fl;[prev,cur]=[cur,prev];
+      if(f%400===0){prog(.25*f/n);await yieldNow()}
+    }
+    flux[0]=0;
+    const sortedR=[...rms].sort((a,b)=>a-b),floor=sortedR[Math.floor(n*.1)],top=sortedR[Math.floor(n*.98)]||peak;
+    const gate=Math.max(floor*2.2,top*dB(-42));
+    if(top<floor*3&&floor>.02)warnings.push("noisy");
+
+    const fT=f=>(f*HOP+FCENTER)/SR,pT=f=>(f*HOP+PCENTER)/SR;
+    /* onset picking from flux */
+    const onsetS=[];
+    {
+      const fl=[...flux].filter(v=>v>0).sort((a,b)=>a-b),hi=fl[Math.floor(fl.length*.97)]||1;
+      const win=Math.round(.14*SR/HOP),minGap=Math.round(.055*SR/HOP);let lastF=-99;
+      for(let f=2;f<n-2;f++){
+        if(!(flux[f]>=flux[f-1]&&flux[f]>flux[f+1]))continue;
+        let s=0,c=0;for(let j=Math.max(0,f-win);j<=Math.min(n-1,f+win);j++){s+=flux[j];c++}
+        const thr=Math.max(.11*hi,1.22*s/c);
+        if(flux[f]<thr)continue;
+        const after=Math.max(rms[f],rms[Math.min(n-1,f+3)],rms[Math.min(n-1,f+6)]);
+        if(after<gate)continue;
+        if(f-lastF<minGap){if(flux[f]>onsetS[onsetS.length-1].s){onsetS[onsetS.length-1]={t:fT(f),s:flux[f],f};lastF=f}continue}
+        onsetS.push({t:fT(f),s:flux[f],f});lastF=f;
+      }
+    }
+
+    const free=new Uint8Array(n+8);
+    for(const o of onsetS){const pf=Math.round((o.t*SR-PCENTER)/HOP);for(let j=pf;j<=pf+6;j++)if(j>=0&&j<n)free[j]=1}
+    /* pitch candidates per frame, then Viterbi smoothing */
+    const d=new Float32Array(TMAX+2),cands=new Array(n);
+    for(let f=0;f<n;f++){
+      const loud=Math.min(rms[f],rms[Math.min(n-1,f+2)]);
+      cands[f]=loud>=gate*.55?yinFrame(x,f*HOP,d):[];
+      if(f%60===0){prog(.25+.6*f/n);await yieldNow()}
+    }
+    const pitchFrame=new Float32Array(n).fill(NaN),aper=new Float32Array(n).fill(1);
+    {
+      const ln=t=>Math.log2(t);let scores=[],back=[],last=null;
+      const flush=(from,to)=>{
+        if(!scores.length)return;
+        let k=0;const end=scores[scores.length-1];for(let j=1;j<end.length;j++)if(end[j]<end[k])k=j;
+        for(let f=to;f>=from;f--){const c=cands[f][k];pitchFrame[f]=SR/c.tau;aper[f]=c.d;k=back[f-from][k]}
+        scores=[];back=[];
+      };
+      let from=-1;
+      for(let f=0;f<n;f++){
+        const c=cands[f];
+        if(!c.length){if(from>=0)flush(from,f-1);from=-1;last=null;continue}
+        if(from<0)from=f;
+        const local=c.map(o=>o.d+.05*ln(o.tau/TMIN));
+        if(!last){scores.push(local);back.push(c.map(()=>0))}
+        else{
+          const pv=scores[scores.length-1],b=[],s=[];
+          for(let i=0;i<c.length;i++){
+            let bs=Infinity,bi=0;
+            for(let j=0;j<last.length;j++){
+              const v=pv[j]+(free[f]?.02:1)*Math.min(.28,1.6*Math.abs(ln(c[i].tau/last[j].tau)));
+              if(v<bs){bs=v;bi=j}
+            }
+            s.push(bs+local[i]);b.push(bi);
+          }
+          scores.push(s);back.push(b);
+        }
+        last=c;
+      }
+      if(from>=0)flush(from,n-1);
+    }
+    prog(.88);await yieldNow();
+
+    const pitch=new Float32Array(n).fill(NaN);
+    for(let f=0;f<n;f++)if(pitchFrame[f]>0&&aper[f]<.42)pitch[f]=69+12*Math.log2(pitchFrame[f]/440);
+
+    /* cut points: onsets plus stable pitch steps without an attack (hammer-on, slide) */
+    const onsetFrames=onsetS.map(o=>({pf:Math.max(0,Math.round((o.t*SR-PCENTER)/HOP)),t:o.t,s:o.s,kind:"onset"}));
+    const smooth=new Float32Array(n).fill(NaN);
+    for(let f=2;f<n-2;f++){const a=[];for(let j=f-2;j<=f+2;j++)if(!isNaN(pitch[j]))a.push(pitch[j]);if(a.length>=3)smooth[f]=median(a)}
+    const cuts=[...onsetFrames];
+    {
+      let i=0;
+      for(let c=0;c<=onsetFrames.length;c++){
+        const lo=c===0?0:onsetFrames[c-1].pf,hi=c<onsetFrames.length?onsetFrames[c].pf:n;
+        let curP=NaN,hold=0,startF=lo;
+        for(i=lo;i<hi;i++){
+          const p=smooth[i];if(isNaN(p))continue;
+          if(isNaN(curP)){curP=p;hold=0;continue}
+          if(Math.abs(p-curP)>.72){
+            hold++;
+            if(hold===1)startF=i;
+            if(hold>=6){cuts.push({pf:startF,t:pT(startF),s:0,kind:"pitch"});curP=p;hold=0}
+          }else{hold=0;curP=curP*.9+p*.1}
+        }
+      }
+    }
+    /* active regions that begin without a detected onset still count */
+    for(let f=1;f<n;f++){
+      if(rms[f]>=gate&&rms[f-1]<gate&&!cuts.some(c=>Math.abs(c.pf-f)<10))cuts.push({pf:f,t:fT(f),s:0,kind:"level"});
+    }
+    cuts.sort((a,b)=>a.t-b.t);
+
+    /* energy at the harmonics of one pitch, in a window that starts at a frame: ringing notes of another pitch hardly touch it */
+    const specAt=(f,size)=>{
+      const N=size,rr=new Float64Array(N),ii=new Float64Array(N),st=Math.max(0,f*HOP);
+      for(let i=0;i<N;i++){const v=st+i<x.length?x[st+i]:0;rr[i]=v*(.5-.5*Math.cos(2*Math.PI*i/(N-1)))}
+      fft(rr,ii);const mag=new Float64Array(N/2);for(let b=0;b<N/2;b++)mag[b]=Math.hypot(rr[b],ii[b]);return mag};
+    const comb=(mag,midi)=>{const N=mag.length*2,fq=440*Math.pow(2,(midi-69)/12);let e=0;
+      for(let h=1;h<=6;h++){const b=Math.round(h*fq*N/SR);if(b>=mag.length-1)break;e+=Math.max(mag[b-1]||0,mag[b],mag[b+1])/Math.sqrt(h)}return e};
+    const combRise=(f,midi)=>{
+      const before=comb(specAt(Math.max(0,f-5),1024),midi);
+      let after=0;for(const k of[0,1,2,3])after=Math.max(after,comb(specAt(f+k,1024),midi));
+      return after/(before+1e-6)};
+    /* pitch of whatever was just plucked, read from the growth of the spectrum */
+    const attackPitch=f=>{
+      const a=specAt(Math.max(0,f-8),2048);let b=null;
+      for(const k of[0,2]){const s=specAt(f+k,2048);if(!b)b=s.slice();else for(let i=0;i<b.length;i++)b[i]=Math.max(b[i],s[i])}
+      const dif=b.map((v,i)=>Math.max(0,v-a[i]));
+      let best=null,bs=0;
+      for(let m=38;m<=91;m++){
+        const fq=440*Math.pow(2,(m-69)/12),N=2048;let e=0,odd=0;
+        for(let h=1;h<=6;h++){const bn=Math.round(h*fq*N/SR);if(bn>=dif.length-1)break;const v=Math.max(dif[bn-1],dif[bn],dif[bn+1])/Math.sqrt(h);e+=v;if(h%2)odd+=v}
+        const s=Math.min(e,odd*2.6);if(s>bs){bs=s;best=m}
+      }
+      return best};
+
+    /* a new pluck resets the phases of the partials, even when it is softer than the ringing note */
+    const cplx=(f)=>{const N=1024,rr=new Float64Array(N),ii=new Float64Array(N),st=Math.max(0,f*HOP);for(let i=0;i<N;i++){const v=st+i<x.length?x[st+i]:0;rr[i]=v*hann[i]}fft(rr,ii);return{rr,ii}};
+    const phaseBreak=(f,midi)=>{
+      const fq=440*Math.pow(2,(midi-69)/12);let peak=0;
+      for(let k=-1;k<=3;k++){
+        const a=cplx(f+k-2),b=cplx(f+k-1),c=cplx(f+k);let dev=0,tot=0;
+        for(let h=1;h<=5;h++){
+          const bn=Math.round(h*fq*1024/SR);if(bn>=511)break;
+          const pa=Math.atan2(a.ii[bn],a.rr[bn]),pb=Math.atan2(b.ii[bn],b.rr[bn]),mb=Math.hypot(b.rr[bn],b.ii[bn]),ang=2*pb-pa;
+          const dr=c.rr[bn]-mb*Math.cos(ang),di=c.ii[bn]-mb*Math.sin(ang);dev+=Math.hypot(dr,di);tot+=Math.hypot(c.rr[bn],c.ii[bn])+mb;
+        }
+        if(tot>0)peak=Math.max(peak,dev/tot);
+      }
+      return peak};
+    /* how much of the sound sits on the harmonics of the pitch: plucks are high, squeaks and noise are low */
+    const harmonicity=(f,midi,size)=>{size=size||2048;const mag=specAt(f,size),fq=440*Math.pow(2,(midi-69)/12);let on=0,all=0;const lo=Math.floor(70*size/SR),hi=Math.floor(5000*size/SR),wd=size>1024?2:1;
+      for(let b=lo;b<hi;b++)all+=mag[b]*mag[b];
+      for(let h=1;h<=12;h++){const c=Math.round(h*fq*size/SR);if(c+wd>=hi)break;for(let d=-wd;d<=wd;d++)on+=mag[c+d]*mag[c+d]}
+      return all?on/all:0};
+
+    const sMaxD=Math.max(1e-6,...onsetS.map(o=>o.s));
+    let actB=0,badB=0;for(let f=0;f<n;f++)if(rms[f]>=gate*1.5){actB++;if(!(aper[f]<.3))badB++}
+    const badFrac=actB?badB/actB:0;
+    /* build notes */
+    let raw=[];
+    for(let c=0;c<cuts.length;c++){
+      const cut=cuts[c],nextF=c+1<cuts.length?cuts[c+1].pf:n;
+      const skip=Math.ceil((.022+PCENTER/SR*.55)*SR/HOP);
+      const st=cut.pf+(cut.kind==="pitch"?2:skip),lim=Math.min(n,nextF+1);
+      let pk=0;for(let f=cut.pf;f<Math.min(lim,cut.pf+Math.round(.15*SR/HOP));f++)if(rms[f]>pk)pk=rms[f];
+      if(pk<gate)continue;
+      const endThr=Math.max(gate,pk*dB(-30));
+      let end=lim-1;for(let f=Math.min(lim-1,cut.pf+3);f<lim;f++){if(rms[f]<endThr){end=f;break}}
+      const ps=[],ap=[];
+      for(let f=Math.min(st,end);f<=Math.min(end,lim-1);f++)if(!isNaN(pitch[f])){ps.push(pitch[f]);ap.push(aper[f])}
+      /* very short notes: take what exists, the window edge overlaps the attack */
+      if(ps.length<3){
+        for(let f=cut.pf;f<=end;f++)if(!isNaN(pitch[f])){ps.push(pitch[f]);ap.push(aper[f])}
+      }
+      if(ps.length<2){
+        if(badFrac>=.2&&cut.kind==="onset"&&cut.s>=.33*sMaxD){
+          const m=attackPitch(Math.max(0,Math.round((cut.t*SR-FCENTER)/HOP)));
+          if(m!=null)raw.push({t0:cut.t,t1:fT(end),p:m,iqr:.3,ap:.15,pk,cut,frames:2,sn:Math.floor(pT(cut.pf)*SR),en:Math.floor(pT(end)*SR+PCENTER)});
+        }
+        continue;
+      }
+      const p=median(ps),iqr=quant(ps,.75)-quant(ps,.25);
+      raw.push({t0:cut.t,t1:fT(end),p,iqr,ap:median(ap),pk,cut,frames:ps.length,sn:Math.floor(pT(st)*SR-PCENTER),en:Math.floor(pT(end)*SR+PCENTER)});
+    }
+    {
+      const kept=[];
+      for(let i=0;i<raw.length;i++){
+        const r=raw[i],nx=raw[i+1];
+        const pr=kept[kept.length-1],ringing=pr&&Math.abs(r.p-pr.p)<.5;
+        if(nx&&r.cut.kind!=="pitch"&&nx.cut.kind==="pitch"&&nx.t0-r.t0<(ringing?.3:.13)){nx.t0=r.t0;nx.cut={...nx.cut,kind:r.cut.kind,s:r.cut.s,pf:r.cut.pf};continue}
+        kept.push(r);
+      }
+      raw=kept;
+    }
+    if(!raw.length){warnings.push("noPitch");return empty}
+
+    /* tuning of the instrument: circular median of the deviation from equal temperament */
+    let tune=0;{
+      const devs=raw.filter(r=>r.frames>=6).map(r=>r.p-Math.round(r.p));
+      if(devs.length){const cand=[...devs].sort((a,b)=>a-b);tune=median(cand);if(Math.abs(tune)>.45)tune=0}
+    }
+    /* octave errors are handled in three places: the pitch path prefers the shortest period that fits,
+       it may jump freely only at attacks, and pitch flips by 12, 19 or 24 semitones without an attack are merged below. */
+    for(const r of raw){r.midi=Math.round(r.p-tune);r.dev=r.p-tune-r.midi}
+    /* Open strings that keep ringing make the recording aperiodic. Only then the attack overrides the steady pitch reading. */
+    let actE=0,badE=0;for(let f=0;f<n;f++)if(rms[f]>=gate*1.5){actE++;if(!(aper[f]<.3))badE++}
+    const attackMode=actE>0&&badE/actE>=.2;
+    if(attackMode)    /* The attack decides. A pluck is recognised by the growth of the spectrum, and that growth also names the new note,
+       while open strings keep ringing and the steady pitch reading follows them or a period they share. */
+    {
+      const kept=[];
+      const support=(f,m)=>{for(let k=f;k<Math.min(n,f+12);k++){for(const c of cands[k]||[]){const q=69+12*Math.log2(SR/c.tau/440);if(Math.abs(q-m)<.45&&c.d<.5)return true}}return false};
+      for(const r of raw){
+        if(r.cut.kind!=="onset"){kept.push(r);continue}
+        const f=Math.max(0,Math.round((r.t0*SR-FCENTER)/HOP)),sRel=r.cut.s/sMaxD;
+        let m=attackPitch(f),rise=m!=null?combRise(f,m):0;
+        r.strong=sRel>=.33||(sRel>=.2&&rise>=3);
+        const q=kept[kept.length-1];
+        if(!r.strong&&q&&r.t0-q.t1<.25){
+          const samePitch=Math.round(r.p-tune)===q.midi,pb=samePitch&&sRel>=.18?phaseBreak(f,q.midi):0;
+          if(!(samePitch&&pb>=.3)){q.t1=Math.max(q.t1,r.t1);continue}
+        }
+        let after=0;for(let k=1;k<=5;k++)after=Math.max(after,rms[Math.min(n-1,f+k)]);
+        const ringing=rms[Math.max(0,f-3)]>=.12*after;
+        if(r.strong&&ringing&&m!=null&&m!==r.midi){
+          if(!support(f,m)&&support(f,m-12))m-=12;
+          const prevSame=q&&r.midi===q.midi,sub=[12,19,24].includes(m-r.midi),unsure=r.ap>.22;
+          if(m!==r.midi&&(prevSame||sub||unsure)){
+            r.midi=m;r.dev=0;const sure=rise>=4;r.ap=sure?.06:.12;r.iqr=sure?.15:.3;r.fromAttack=true;
+          }
+        }
+        kept.push(r);
+      }
+      raw=kept;
+    }
+    else{
+    /* over a ringing string the pitch reading can follow the old note or a shared period. What grew at the attack is the new note. */
+    for(let i=1;i<raw.length;i++){
+      const r=raw[i],q=raw[i-1];
+      if(r.cut.kind!=="onset"||r.t0-q.t1>.12)continue;
+      const f=Math.max(0,Math.round((r.t0*SR-FCENTER)/HOP)),here=combRise(f,r.midi);
+      if(r.midi===q.midi&&here>=1.12)continue;
+      if(r.midi!==q.midi){
+        const b4=comb(specAt(Math.max(0,f-5),1024),q.midi),now=comb(specAt(f+1,1024),q.midi);
+        if(here>=2.2||b4<=0||now<.45*b4)continue;
+      }
+      const m=attackPitch(f);if(m==null||m===r.midi)continue;
+      const there=combRise(f,m);
+      if(there>2&&there>here*(r.midi===q.midi?1.6:2.6)){r.midi=m;r.dev=0;r.ap=Math.max(r.ap,.12);r.iqr=Math.max(r.iqr,.3);r.fromAttack=true}
+    }
+    }
+    /* noise notes: a squeak or a scrape has hardly any energy on harmonics. An attack can still reveal the plucked pitch. */
+    {
+      const pass=[];
+      for(const r of raw){
+        const f=Math.max(0,Math.round((r.t0*SR-FCENTER)/HOP));
+        const size=r.t1-r.t0<.2?1024:2048;
+        r.h=harmonicity(f+2,r.midi,size);
+        if(r.h<(size<2048?.3:.35)&&!(attackMode&&r.fromAttack)){
+          if(r.cut.kind!=="onset"||r.cut.s<.25*sMaxD)continue;
+          const m=attackPitch(f);
+          if(m==null||harmonicity(f+2,m,size)<.5)continue;
+          r.midi=m;r.dev=0;r.h=harmonicity(f+2,m,size);r.fromAttack=true;r.iqr=Math.max(r.iqr,.3);
+        }
+        pass.push(r);
+      }
+      raw=pass;
+    }
+    /* merge fragments of one note */
+    const notes=[];
+    const strong=median(onsetS.map(o=>o.s))||1;const sMax=Math.max(1e-6,...onsetS.map(o=>o.s));
+    for(const r of raw){
+      const q=notes[notes.length-1];
+      if(q&&q.midi===r.midi&&(r.cut.kind==="onset"?r.t0-q.t1<.9:r.t0-q.t1<.06)){
+        const fi=r.cut.pf,before=rms[Math.max(0,fi-3)],after=Math.max(rms[Math.min(n-1,fi+3)],rms[Math.min(n-1,fi+6)]);
+        const rise=after/(before||1e-6);
+        const f0=Math.max(0,Math.round((r.t0*SR-FCENTER)/HOP)),on=r.cut.kind==="onset";
+        const sRel=r.cut.s/sMaxD,cr=on?combRise(f0,r.midi):0,cd=on&&sRel>=.18?phaseBreak(f0,r.midi):0;
+        const reattack=on&&((cd>=.38&&sRel>=.2&&(cr>=.95||cd>=.62))||(cd>=.18&&sRel>=.34)||(cr>=1.25&&sRel>=.26))||(r.strong&&sRel>=.33);
+        if(!reattack){q.t1=r.t1;q.frames+=r.frames;continue}
+      }
+      if(attackMode&&q&&r.cut.kind==="pitch"&&r.ap>.15&&combRise(Math.max(0,Math.round((r.t0*SR-FCENTER)/HOP)),r.midi)<1.25){q.t1=r.t1;q.frames+=r.frames;continue}
+      const weakOn=r.cut.kind==="onset"&&r.cut.s<.2*sMaxD;
+      if(q&&[12,19,24].includes(Math.abs(q.midi-r.midi))&&r.t0-q.t1<.06&&(r.cut.kind==="pitch"||(weakOn&&combRise(Math.max(0,Math.round((r.t0*SR-FCENTER)/HOP)),r.midi)<1.3))){if(r.frames>q.frames||(r.frames>=q.frames*.6&&r.midi>q.midi)){q.midi=r.midi;q.dev=r.dev;q.ap=r.ap;q.iqr=r.iqr}q.t1=r.t1;q.frames+=r.frames;continue}
+      notes.push(r);
+    }
+    /* notes passed on the way through a slide: no attack, short, strictly between their neighbours */
+    for(let i=notes.length-2;i>=1;i--){
+      const r=notes[i],a=notes[i-1],b=notes[i+1];
+      if(r.cut.kind!=="onset"&&(r.t1-r.t0<.11||(r.t1-r.t0<.2&&r.iqr>.3))&&r.midi>Math.min(a.midi,b.midi)&&r.midi<Math.max(a.midi,b.midi)){a.t1=r.t1;notes.splice(i,1)}
+    }
+    /* Sounds of the hands, not plucks: a pick touching a string, a finger lifted or moved along the neck.
+       They are quiet, their own harmonics do not grow and the phases of the partials do not reset. */
+    {
+      const pkM=median(notes.map(q=>q.pk));
+      for(let i=notes.length-1;i>=1;i--){
+        const r=notes[i];if(r.cut.kind!=="onset"||r.pk>=.7*pkM)continue;
+        /* a slide also lacks an attack, but it stays loud, lasts and moves only a little */
+        const step=Math.abs(r.midi-notes[i-1].midi);
+        if(r.pk>=.3*pkM&&r.t1-r.t0>=.2&&step>=1&&step<=4)continue;
+        const f=Math.max(0,Math.round((r.t0*SR-FCENTER)/HOP));
+        if(combRise(f,r.midi)<2.6&&phaseBreak(f,r.midi)<.55){notes[i-1].t1=Math.max(notes[i-1].t1,r.t1);notes.splice(i,1)}
+      }
+    }
+    /* drop noise and blips */
+    let out=notes.filter(r=>{
+      const dur=r.t1-r.t0;
+      if(r.cut.kind!=="onset"&&dur<.07)return false;
+      if(dur<.035)return false;
+      return r.ap<.4;
+    }).map(r=>{
+      const dur=Math.max(.03,r.t1-r.t0);
+      const periodic=clamp01(1-r.ap/.32),steady=clamp01(1-r.iqr/.55),center=clamp01(1-Math.abs(r.dev)/.5),length=clamp01(dur/.11);
+      let conf=.42*periodic+.2*steady+.23*center+.15*length;
+      return{midi:r.midi,t0:+r.t0.toFixed(3),dur:+dur.toFixed(3),conf:+conf.toFixed(2),cents:Math.round(r.dev*100),soft:r.cut.kind!=="onset"};
+    });
+    if(!out.length){warnings.push("noPitch");return empty}
+
+    /* polyphony and range warnings */
+    let act=0,bad=0;for(let f=0;f<n;f++)if(rms[f]>=gate*1.5){act++;if(!(aper[f]<.3))bad++}
+    if(act&&bad/act>.4)warnings.push("polyphony");
+    if(out.some(o=>o.midi<38||o.midi>90))warnings.push("range");
+
+    /* can this recording be transcribed at all? */
+    const kept=notes.filter(r=>r.h!=null);
+    const avg=(a,g)=>a.length?a.reduce((v,o)=>v+g(o),0)/a.length:0;
+    const stats={aper:act?+(bad/act).toFixed(2):0,h:+avg(kept,r=>r.h).toFixed(2),dev:+avg(kept,r=>Math.abs(r.dev||0)).toFixed(2),iqr:+avg(kept,r=>r.iqr).toFixed(2),low:+avg(out,o=>o.conf<.75?1:0).toFixed(2),rate:+(out.length/Math.max(.5,samples.length/sampleRate)).toFixed(1)};
+    /* rests */
+    const rests=[];
+    for(let i=1;i<out.length;i++){const a=out[i-1],gap=out[i].t0-(a.t0+a.dur);if(gap>=.09)rests.push({t0:+(a.t0+a.dur).toFixed(3),dur:+gap.toFixed(3)})}
+
+    const tempo=estimateTempo(out.map(o=>o.t0));
+    if(tempo.bpm){const beat=60/tempo.bpm;out.forEach((o,i)=>{const nx=i+1<out.length?out[i+1].t0:o.t0+o.dur;o.beats=Math.max(.25,Math.round((nx-o.t0)/beat*4)/4)})}
+    const w=out.reduce((a,o)=>a+Math.min(1,o.dur),0)||1;
+    const confidence=+(out.reduce((a,o)=>a+o.conf*Math.min(1,o.dur),0)/w).toFixed(2);
+    prog(1);
+    return{stats,verdict:verdictOf(stats,warnings,out),notes:out,rests,bpm:tempo.bpm,bpmConf:+tempo.conf.toFixed(2),tuningCents:Math.round(tune*100),confidence,warnings,duration:samples.length/sampleRate};
+  }
+  /* Compare the notes the player really played with the transcription. Written expected notes may omit the octave. */
+  function compare(expected,got){
+    const m=expected.length,k=got.length,dp=[];
+    const eq=(e,g)=>e.pc===undefined?false:(e.midi!=null?e.midi===g:((g%12)+12)%12===e.pc);
+    for(let i=0;i<=m;i++){dp[i]=new Array(k+1).fill(0);dp[i][0]=i}
+    for(let j=0;j<=k;j++)dp[0][j]=j;
+    for(let i=1;i<=m;i++)for(let j=1;j<=k;j++)dp[i][j]=Math.min(dp[i-1][j]+1,dp[i][j-1]+1,dp[i-1][j-1]+(eq(expected[i-1],got[j-1])?0:1));
+    let i=m,j=k,right=0,wrong=0,missing=0,extra=0,octave=0;const trail=[];
+    while(i>0||j>0){
+      if(i>0&&j>0&&dp[i][j]===dp[i-1][j-1]+(eq(expected[i-1],got[j-1])?0:1)){
+        if(eq(expected[i-1],got[j-1])){right++;trail.unshift("ok")}
+        else{wrong++;if(expected[i-1].midi!=null&&((expected[i-1].midi-got[j-1])%12===0))octave++;trail.unshift("wrong")}
+        i--;j--;
+      }else if(i>0&&dp[i][j]===dp[i-1][j]+1){missing++;trail.unshift("missing");i--}
+      else{extra++;trail.unshift("extra");j--}
+    }
+    return{right,wrong,missing,extra,octave,total:m,score:m?right/(m+extra):0,trail};
+  }
+  return{transcribe,compare,resample,SR,VERSION:"0.4"};
+})();
+
 /* ---------- turn music into notes: recording, upload, results ---------- */
 const TR={clip:null,res:null,rec:null,busy:false,err:"",saved:[],sources:[],check:null,playing:null,progress:0};
 const TR_MAX=60;
@@ -2302,7 +3201,7 @@ app.addEventListener("keydown",e=>{if(e.target.id==="tr-filelab"&&(e.key==="Ente
 /* ---------- microphone check, real guitar test kit, developer report ---------- */
 /* The address where the app runs in its own window, outside the viewer's frame. Empty until it is deployed. */
 const PUBLIC_URL="https://sivsiv770.github.io/piki-notes/";
-const ENGINES={"0.3":Transcriber,"0.2":TranscriberV02,"0.1":TranscriberV01};
+const ENGINES={"0.5":Transcriber,"0.4":TranscriberV04,"0.3":TranscriberV03,"0.2":TranscriberV02,"0.1":TranscriberV01};
 const inFrame=(()=>{try{return window.top!==window}catch(e){return true}})();
 function standaloneLink(){
   if(!PUBLIC_URL||location.href.startsWith(PUBLIC_URL))return"";
@@ -2532,7 +3431,7 @@ function drawDev(){
    <section class="sec trbox"><h2>בדיקה של קבצים משלכם</h2>
      <p class="note-text">מעלים הקלטות וקובצי תווים באותו שם, למשל <span dir="ltr">song1.m4a</span> ו-<span dir="ltr">song1.txt</span>. קובץ טקסט: התווים כפי שנכתבו על החמשה, כמו <span dir="ltr">E4 F4:2 R:1 G4</span>. קובץ JSON: <span dir="ltr">{"notes":[{"midi":52,"t":0.4,"dur":0.5}]}</span> בגובה הנשמע, ועם זמנים בשניות אפשר למדוד גם תחילת תו מדויקת.</p>
      <div class="row"><label class="btn" for="dv-files">בחירת קבצים</label><input type="file" id="dv-files" class="vh" multiple>
-     <label class="seglab" for="dv-engine">מנוע <select id="dv-engine"><option value="0.3">0.3</option><option value="0.2">0.2</option><option value="0.1">0.1</option><option value="both">כולם, להשוואה</option></select></label>
+     <label class="seglab" for="dv-engine">מנוע <select id="dv-engine"><option value="0.5">0.5</option><option value="0.4">0.4</option><option value="0.3">0.3</option><option value="0.2">0.2</option><option value="0.1">0.1</option><option value="both">כולם, להשוואה</option></select></label>
      <button class="btn main" id="dv-run"${DV.busy?" disabled":""}>להריץ</button></div>
      <p class="note-text">נבחרו ${b.audio.length} הקלטות ו-${b.truth.length} קובצי תווים.</p><div id="dv-batchres">${DV.batchHTML||""}</div></section>
    <section class="sec trbox"><h2>השוואה בין גרסאות המנוע</h2><div class="row"><button class="btn small" id="dv-rerun"${DV.busy?" disabled":""}>להריץ את ההקלטות השמורות בכל הגרסאות</button></div><div id="dv-runs">${runsHTML()}</div></section>`;
@@ -2572,7 +3471,7 @@ async function saveReport(){
 }
 async function batchRun(ver){
   const b=DV.batch,base=n=>n.replace(/\.[^.]+$/,"").toLowerCase();DV.msg="";
-  const vers=ver==="both"?["0.3","0.2","0.1"]:[ver],out={};vers.forEach(v=>out[v]=[]);let html="",bad=[];
+  const vers=ver==="both"?["0.5","0.4","0.3","0.2","0.1"]:[ver],out={};vers.forEach(v=>out[v]=[]);let html="",bad=[];
   for(let i=0;i<b.audio.length;i++){
     const f=b.audio[i],tf=b.truth.find(t=>base(t.name)===base(f.name));
     DV.busy=`${i+1} מתוך ${b.audio.length}: ${f.name}`;drawDev();
@@ -2598,7 +3497,7 @@ async function rerunStored(){
   const ts=KIT.filter(k=>!k.unsuit).map(k=>latest(k.id)).filter(Boolean);
   if(!ts.length){DV.msg="עוד אין הקלטות שמורות בערכת הבדיקה.";drawDev();return}
   DV.msg="";
-  for(const v of["0.3","0.2","0.1"]){
+  for(const v of["0.5","0.4","0.3","0.2","0.1"]){
     const items=[];
     for(let i=0;i<ts.length;i++){
       DV.busy=`מנוע ${v}: ${i+1} מתוך ${ts.length}`;drawDev();
