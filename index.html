@@ -211,6 +211,16 @@ label.btn{cursor:pointer}
 .seglab select{font:inherit;min-height:46px;border:3px solid var(--line);border-radius:12px;background:var(--panel);color:var(--fg);padding:0 .5em}
 a.btn{text-decoration:none;color:var(--on-pick)}
 summary{cursor:pointer;min-height:36px}
+.edglobal{display:flex;flex-wrap:wrap;gap:10px 18px}
+.edglobal input{font:inherit;width:5.5em;min-height:46px;border:3px solid var(--line);border-radius:12px;background:var(--panel);color:var(--fg);padding:0 .4em}
+.edsheet{background:var(--paper);outline-offset:3px}
+.edsheet svg{cursor:pointer}
+.edpanel{display:flex;flex-direction:column;gap:10px;border-top:3px solid var(--bg-2);padding-top:10px}
+.edsel{font-size:1.05rem}
+.edrow{display:flex;flex-direction:column;gap:4px}
+.edbtns{display:flex;flex-wrap:wrap;gap:6px}
+.edbtns .btn.small{min-height:44px;padding:.15em .7em}
+.edbtns .btn[aria-pressed="true"]{background:var(--pick);color:var(--on-pick);border-color:var(--on-pick)}
 
 /* settings and tuner */
 .opts{display:flex;flex-direction:column;gap:10px;max-width:640px}
@@ -481,7 +491,7 @@ function fretboard(win,lefty){
 const app=document.getElementById("app"),live=document.getElementById("live");
 function announce(t){live.textContent="";setTimeout(()=>live.textContent=t,30)}
 function show(html){stopAll();app.innerHTML=html;scrollTo(0,0);const h=app.querySelector("h1");if(h){h.tabIndex=-1;h.focus({preventScroll:true})}}
-function stopAll(){if(G){G.over=true;G=null}Mic.stop();trStop(true)}
+function stopAll(){if(G){G.over=true;G=null}Mic.stop();trStop(true);if(typeof Ed!=="undefined")Ed.stop()}
 function bestStars(id){const s=DB.stars[id]||{};return Math.max(0,...Object.values(s))}
 function isOpen(i){return i===0||DB.set.open||bestStars(LEVELS[i-1].id)>=1}
 function currentLevel(){for(let i=0;i<LEVELS.length;i++)if(isOpen(i)&&bestStars(LEVELS[i].id)===0)return LEVELS[i];
@@ -3039,7 +3049,7 @@ async function runTranscribe(){
   const c=TR.clip;
   try{
     const res=await Transcriber.transcribe(c.x,c.sr,{onProgress:p=>{TR.progress=p;const b=document.getElementById("tr-prog");if(b)b.style.width=Math.round(p*100)+"%"},yield:()=>new Promise(r=>setTimeout(r,0))});
-    TR.res=res;c.res=res;TR.check=null;
+    TR.res=res;c.res=res;c.score=null;TR.scoreFor=null;TR.check=null;
     Lib.tx("readonly",s=>s.get(c.id)).then(o=>{if(o){o.res=res;Lib.put(o).then(refreshSaved)}}).catch(()=>{});
   }catch(e){TR.err="הניתוח נכשל. נסו הקלטה קצרה יותר."}
   TR.busy=false;drawTr();
@@ -3078,10 +3088,10 @@ function resHTML(){
     <div class="facts"><div><b>${pct}%</b>רמת ביטחון</div><div><b>${r.notes.length}</b>תווים${doubts?`, ${doubts} בספק`:""}</div><div><b>${tempo}</b>פעמות לדקה</div></div>
     ${warn?`<ul class="trw">${warn}</ul>`:""}
     ${Math.abs(r.tuningCents)>=12?`<p class="note-text">הגיטרה נשמעת ${r.tuningCents>0?"גבוהה":"נמוכה"} ב-${Math.abs(r.tuningCents)} סנט מהכיוון הרגיל. התחשבנו בזה בזיהוי.</p>`:""}
-    ${staffOf(r)}
     <div class="row"><button class="btn" id="btn-notes">להשמיע את התווים שזוהו</button><button class="btn" id="btn-clip2">האזן להקלטה</button></div>
-    <div class="trtable"><table><thead><tr><th>#</th><th>תו</th><th>התחלה (שנ׳)</th><th>משך (שנ׳)</th><th>פעמות</th><th>ביטחון</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <details><summary>פירוט הזיהוי, תו אחר תו</summary><div class="trtable"><table><thead><tr><th>#</th><th>תו</th><th>התחלה (שנ׳)</th><th>משך (שנ׳)</th><th>פעמות</th><th>ביטחון</th></tr></thead><tbody>${rows}</tbody></table></div></details>
   </section>
+  <section class="sec trbox" id="ed-root"></section>
   <section class="sec trbox">
     <h2>בדיקת דיוק</h2>
     <p class="note-text">כתבו את התווים שבאמת ניגנתם, ונבדוק כמה מהם זוהו. אפשר לכתוב <span dir="ltr">מי פה סול</span> או <span dir="ltr">E F# G</span>. עם מספר אוקטבה כמו <span dir="ltr">E4</span> נבדוק גם את האוקטבה, כפי שהיא כתובה על החמשה.</p>
@@ -3148,15 +3158,23 @@ function drawTr(){
       ${TR.busy==="work"?`<div class="meter" role="progressbar" aria-label="ניתוח ההקלטה"><i id="tr-prog"></i></div>`:""}
     </section>`:""}
     <div id="tr-res">${resHTML()}</div>
+    ${!TR.res&&TR.demo?`<section class="sec trbox" id="ed-root"></section>`:""}
     <section class="sec trbox"><h2>יומן בדיקות הדיוק</h2><div id="tr-log">${logHTML()}</div></section>
     <section class="sec trbox"><h2>ההקלטות שלי</h2><div id="tr-lib">${libHTML()}</div></section>`;
-  drawPlayers();
+  drawPlayers();mountEditor();
+}
+function mountEditor(){
+  if(!document.getElementById("ed-root"))return;
+  if(TR.res&&TR.res.notes.length&&TR.clip){
+    if(TR.scoreFor!==TR.clip.id){Ed.load(TR.clip.score||Ed.fromTranscription(TR.res));TR.scoreFor=TR.clip.id}
+  }else if(TR.demo&&TR.scoreFor!=="demo"){Ed.load(TR.demo);TR.scoreFor="demo"}
+  Ed.render();
 }
 function trPage(){
   show(`<main class="page"><button class="btn small back" data-go="home">חזרה למפה</button>
     <div class="head-row"><h1>הפוך מוזיקה לתווים</h1><span class="tagx">ניסיוני</span></div>
     <p class="note-text">מנוע התמלול הוא בשלב ראשון: מנגינה של צליל אחד בכל פעם, בגיטרה נקייה. הוא נבדק עד כה על דגימות גיטרה מוקלטות שהורכבו למנגינות, ועוד לא על נגינה חיה.</p>
-    <div class="row"><button class="btn small" data-go="mic">בדיקת מיקרופון</button></div>${standaloneLink()}
+    <div class="row"><button class="btn small" data-go="mic">בדיקת מיקרופון</button><button class="btn small" id="ed-demo">לנסות את העורך עם מנגינה לדוגמה</button></div>${standaloneLink()}
     <section class="sec"><div style="max-width:440px">${sysSeg()}</div></section>
     <div id="tr-main" class="sec"></div></main>`);
   drawTr();refreshSaved();
@@ -3168,15 +3186,16 @@ app.addEventListener("click",async e=>{
   else if(b.id==="btn-clip"||b.id==="btn-clip2"){if(TR.playing==="clip"){trStop();drawPlayers()}else playClip()}
   else if(b.id==="btn-notes"){if(TR.playing==="notes"){trStop();drawPlayers()}else playDetected()}
   else if(b.id==="tr-go")runTranscribe();
+  else if(b.id==="ed-demo"){TR.clip=null;TR.res=null;TR.demo=Ed.fromText("C3 C3 G3 G3 A3 A3 G3:2 F3 F3 E3 E3 D3 D3 C3:2",100);TR.scoreFor=null;drawTr();const el=document.getElementById("ed-root");if(el)el.scrollIntoView({block:"start",behavior:reduced()?"auto":"smooth"})}
   else if(b.id==="tr-del"){
-    trStop();await Lib.del(TR.clip.id);TR.clip=null;TR.res=null;TR.check=null;TR.err="";await refreshSaved();drawTr();
+    trStop();await Lib.del(TR.clip.id);TR.clip=null;TR.res=null;TR.scoreFor=null;TR.check=null;TR.err="";await refreshSaved();drawTr();
   }
   else if(b.dataset.tn)pluck(+b.dataset.tn);
   else if(b.dataset.del){await Lib.del(b.dataset.del);if(TR.clip&&TR.clip.id===b.dataset.del){TR.clip=null;TR.res=null}await refreshSaved();drawTr()}
   else if(b.dataset.open){
     const c=TR.saved.find(x=>x.id===b.dataset.open);if(!c)return;trStop();
     const x=new Float32Array(c.pcm.length);for(let i=0;i<x.length;i++)x[i]=c.pcm[i]/32767;
-    TR.clip={id:c.id,name:c.name,kind:c.kind,x,sr:c.sr,dur:c.dur,date:c.date,res:c.res,stored:true};TR.res=c.res;TR.check=null;TR.err="";drawTr();
+    TR.clip={id:c.id,name:c.name,kind:c.kind,x,sr:c.sr,dur:c.dur,date:c.date,res:c.res,score:c.score||null,stored:true};TR.scoreFor=null;TR.res=c.res;TR.check=null;TR.err="";drawTr();
     const el=document.getElementById("tr-clip");if(el)el.scrollIntoView({block:"start",behavior:reduced()?"auto":"smooth"});
   }
   else if(b.id==="tr-cmp"){
@@ -3197,6 +3216,259 @@ app.addEventListener("click",async e=>{
 });
 app.addEventListener("change",e=>{if(e.target.id==="tr-file"&&e.target.files[0])loadFile(e.target.files[0])});
 app.addEventListener("keydown",e=>{if(e.target.id==="tr-filelab"&&(e.key==="Enter"||e.key===" ")){e.preventDefault();document.getElementById("tr-file").click()}});
+
+/* ---------- score editor: staff and tablature stacked, one data model ---------- */
+/* A score item: {midi, beats, s, f, lock} for a note, {rest:true, beats} for a rest. midi is the SOUNDING pitch. */
+const Ed=(()=>{
+  const TUNING={1:64,2:59,3:55,4:50,5:45,6:40},MAXF=17,LOW=40,HIGH=88;
+  const DURS=[[4,"שלם"],[3,"חצי מנוקד"],[2,"חצי"],[1.5,"רבע מנוקד"],[1,"רבע"],[.75,"שמינית מנוקדת"],[.5,"שמינית"],[.25,"שש-עשרית"]];
+  const POS=[[0,"פתוחה (סריגים 0 עד 4)",0,4],[2,"סריג 2 (2 עד 5)",2,5],[5,"סריג 5 (5 עד 9)",5,9],[7,"סריג 7 (7 עד 11)",7,11],[12,"סריג 12 (12 עד 16)",12,16]];
+  const TS=[[2,4],[3,4],[4,4],[6,8]];
+  const VIEWS=[["both","תווים וטאבים"],["staff","תווים"],["tab","טאבים"]];
+  let st=null,sel=0,hist=[],hp=-1,view="both",playT=[],playing=false,saveTimer=0;
+
+  const positionsOf=m=>{const o=[];for(let s=1;s<=6;s++){const f=m-TUNING[s];if(f>=0&&f<=MAXF)o.push({s,f})}return o};
+  /* Viterbi over playable positions: stay inside the chosen position, keep the hand still, prefer open strings in first position */
+  function assignTabs(items,pref){
+    const P=POS.find(p=>p[0]===pref)||POS[0],lo=P[2],hi=P[3];
+    const idx=items.map((it,i)=>it.rest?-1:i).filter(i=>i>=0);
+    if(!idx.length)return;
+    const opts=idx.map(i=>{const it=items[i];let o=positionsOf(it.midi);if(it.lock){const l=o.find(p=>p.s===it.s&&p.f===it.f);if(l)o=[l]}return o.length?o:[{s:1,f:Math.max(0,it.midi-64)}]});
+    const local=p=>{if(p.f===0)return lo===0?0:3;let c=p.f<lo?(lo-p.f)*2:p.f>hi?(p.f-hi)*2:0;return c+p.f*.03};
+    const hand=p=>p.f===0?null:p.f;
+    let cost=opts[0].map(local),back=[];
+    for(let k=1;k<opts.length;k++){
+      const prev=opts[k-1],cur=opts[k],nc=[],nb=[];
+      cur.forEach(p=>{let best=Infinity,bi=0;prev.forEach((q,j)=>{
+        const hp_=hand(q),hc=hand(p);let t=(hp_!=null&&hc!=null)?Math.abs(hp_-hc)*.5:0;t+=Math.abs(p.s-q.s)*.08;
+        if(cost[j]+t<best){best=cost[j]+t;bi=j}});nc.push(best+local(p));nb.push(bi)});
+      cost=nc;back.push(nb);
+    }
+    let j=cost.indexOf(Math.min(...cost));
+    for(let k=opts.length-1;k>=0;k--){const it=items[idx[k]],p=opts[k][j];it.s=p.s;it.f=p.f;if(k>0)j=back[k-1][j]}
+  }
+  const ALLOWED=DURS.map(d=>d[0]);
+  const snap=b=>ALLOWED.reduce((a,c)=>Math.abs(Math.log2(c/b))<Math.abs(Math.log2(a/b))?c:a,1);
+  function fromTranscription(res){
+    const items=[],ns=res.notes;
+    /* the pulse is the most common distance between notes, so that most notes come out as quarters */
+    const ioi=ns.slice(1).map((n,i)=>n.t0-ns[i].t0).filter(v=>v>.12).sort((a,b)=>a-b);
+    let beat=res.bpm?60/res.bpm:.6;
+    if(ioi.length>=3){const med=ioi[ioi.length>>1];beat=med;while(60/beat<50)beat/=2;while(60/beat>160)beat*=2}
+    const bpm=Math.round(60/beat);
+    for(let k=0;k<ns.length;k++){
+      const n=ns[k],b=k+1<ns.length?(ns[k+1].t0-n.t0)/beat:Math.max(1,n.dur/beat);
+      items.push({midi:n.midi,beats:snap(Math.min(b,4))});
+      if(b>4.6)items.push({rest:true,beats:snap(Math.min(b-4,4))});
+    }
+    const s={v:1,bpm,ts:[4,4],pref:0,items};
+    assignTabs(s.items,0);return s;
+  }
+  function fromText(txt,bpm){
+    const items=txt.split(" ").map(t=>{const[p,b]=t.split(":");return p==="R"?{rest:true,beats:+(b||1)}:{midi:N(p).m,beats:+(b||1)}});
+    const s={v:1,bpm:bpm||96,ts:[4,4],pref:0,items};assignTabs(s.items,0);return s;
+  }
+  /* ---------- layout ---------- */
+  const barLen=()=>st.ts[0]*4/st.ts[1];
+  function layout(){
+    const L=barLen(),out=[];let beat=0,x=170;
+    st.items.forEach((it,i)=>{
+      const start=beat,end=beat+it.beats,bar=Math.floor(start/L+1e-9),cross=Math.floor((end-1e-9)/L)>bar;
+      const atBar=i>0&&Math.abs(start/L-Math.round(start/L))<1e-9;
+      if(atBar)x+=18;
+      const w=Math.max(56,it.beats*62);
+      out.push({i,x:x+24,w,start,bar,inBar:+(start-bar*L+1).toFixed(2),cross,atBar,left:x});
+      x+=w;beat=end;
+    });
+    return{cols:out,W:x+40,total:beat};
+  }
+  const ink="var(--paper-ink)";
+  function head(n,y,hollow){return`<ellipse cx="0" cy="${y}" rx="21.5" ry="15.5" transform="rotate(-20 0 ${y})" fill="${hollow?"var(--paper)":ink}" stroke="${ink}" stroke-width="${hollow?4:2.5}"/>`}
+  function noteGlyph(it){
+    const n=noteOf(it.midi),y=-n.step*S;let s="";
+    for(let k=-2;k>=n.step;k-=2)s+=`<line x1="-31" x2="31" y1="${-k*S}" y2="${-k*S}" stroke="${ink}" stroke-width="3"/>`;
+    for(let k=10;k<=n.step;k+=2)s+=`<line x1="-31" x2="31" y1="${-k*S}" y2="${-k*S}" stroke="${ink}" stroke-width="3"/>`;
+    const b=it.beats,dotted=[3,1.5,.75].includes(b),base=dotted?b/1.5:b,hollow=base>=2;
+    if(base<4){
+      const up=n.step<4,len=Math.max(7,Math.abs(n.step-4))*S,tip=up?y-len:y+len,sx=up?19.6:-19.6;
+      s+=`<line x1="${sx}" x2="${sx}" y1="${up?y-3:y+3}" y2="${tip}" stroke="${ink}" stroke-width="3.2"/>`;
+      const flags=base===.5?1:base===.25?2:0;
+      for(let k=0;k<flags;k++){const t=up?tip+k*14:tip-k*14;s+=up?`<path d="M${sx-1.6} ${t}c2 14 26 20 19 44c4-18-8-26-19-28z" fill="${ink}"/>`:`<path d="M${sx-1.6} ${t}c2 -14 26 -20 19 -44c4 18-8 26-19 28z" fill="${ink}"/>`}
+    }
+    s+=head(n,y,hollow);
+    if(dotted){const dy=n.step%2===0?y-8:y;s+=`<circle cx="32" cy="${dy}" r="4.5" fill="${ink}"/>`}
+    if(n.acc){const g=GLYPH.sharp,k=.1;s+=`<path transform="translate(${-36-275*k} ${y+131*k}) scale(${k} ${-k})" d="${g.d}" fill="${ink}"/>`}
+    return s;
+  }
+  function restGlyph(it){
+    const b=it.beats,dotted=[3,1.5,.75].includes(b),base=dotted?b/1.5:b;let s="";
+    if(base===4)s=`<rect x="-14" y="${-6*S}" width="28" height="12" fill="${ink}"/>`;
+    else if(base===2)s=`<rect x="-14" y="${-4*S-12}" width="28" height="12" fill="${ink}"/>`;
+    else if(base===1)s=`<path d="M-6 -104l14 18-10 14 12 18c-10-6-18-2-12 10-14-10-8-24 4-20l-12-16 10-12z" fill="${ink}"/>`;
+    else{const n=base===.5?1:2;for(let k=0;k<n;k++)s+=`<circle cx="${-6+k*-4}" cy="${-76+k*20}" r="6" fill="${ink}"/><path d="M${-6+k*-4} ${-76+k*20}q10 4 14-6l-16 ${46-k*20}" stroke="${ink}" stroke-width="3" fill="none"/>`}
+    if(dotted)s+=`<circle cx="22" cy="-72" r="4.5" fill="${ink}"/>`;
+    return s;
+  }
+  function svg(){
+    const {cols,W}=layout(),notes=st.items.filter(x=>!x.rest).map(x=>noteOf(x.midi)),r=stepRange(notes.length?notes:[N("E4")]);
+    const showStaff=view!=="tab",showTab=view!=="staff";
+    const top=showStaff?-r.hi*S:0,staffBottom=showStaff?-r.lo*S:0,tabTop=showStaff?staffBottom+40:30,TG=20,tabBottom=tabTop+5*TG;
+    const bottom=showTab?tabBottom+40:staffBottom+30,H=bottom-top;let g="";
+    if(showStaff){g+=linesSVG(W)+clefSVG(10)+`<text x="122" y="-76" text-anchor="middle" font-size="58" font-weight="700" fill="${ink}" font-family="Georgia,serif">${st.ts[0]}</text><text x="122" y="-12" text-anchor="middle" font-size="58" font-weight="700" fill="${ink}" font-family="Georgia,serif">${st.ts[1]}</text>`}
+    if(showTab){for(let s=1;s<=6;s++)g+=`<line x1="0" x2="${W}" y1="${tabTop+(s-1)*TG}" y2="${tabTop+(s-1)*TG}" stroke="${ink}" stroke-width="1.6"/>`;
+      ["T","A","B"].forEach((c,k)=>g+=`<text x="40" y="${tabTop+20+k*30}" text-anchor="middle" font-size="26" font-weight="700" fill="${ink}" font-family="var(--body)">${c}</text>`)}
+    const y0=showStaff?-8*S:tabTop,y1=showTab?tabBottom:0;
+    g+=`<line x1="1" x2="1" y1="${y0}" y2="${y1}" stroke="${ink}" stroke-width="3"/><line x1="${W-2}" x2="${W-2}" y1="${y0}" y2="${y1}" stroke="${ink}" stroke-width="5"/>`;
+    cols.forEach(c=>{
+      const it=st.items[c.i];
+      if(c.atBar||c.i===0){
+        if(c.atBar)g+=`<line x1="${c.left-9}" x2="${c.left-9}" y1="${y0}" y2="${y1}" stroke="${ink}" stroke-width="2.4"/>`;
+        g+=`<text x="${c.left-2}" y="${y0-12}" font-size="18" fill="${ink}" font-family="var(--body)">${c.bar+1}</text>`;
+      }
+      const isSel=c.i===sel,hit=`<rect x="${c.left}" y="${top}" width="${c.w}" height="${H}" fill="${isSel?"var(--zone)":"transparent"}" opacity="${isSel?.65:0}"/>`;
+      let body="";
+      if(showStaff)body+=`<g transform="translate(${c.x} 0)">${it.rest?restGlyph(it):noteGlyph(it)}</g>`;
+      if(showStaff&&c.cross)body+=`<line x1="${c.left+6}" x2="${c.left+c.w-6}" y1="28" y2="28" stroke="var(--doubt)" stroke-width="4" stroke-dasharray="8 6"/>`;
+      if(showTab&&!it.rest){const y=tabTop+(it.s-1)*TG,t=String(it.f),w=t.length*14+8;body+=`<rect x="${c.x-w/2}" y="${y-13}" width="${w}" height="26" fill="var(--paper)"/><text x="${c.x}" y="${y+9}" text-anchor="middle" font-size="25" font-weight="700" fill="${ink}" font-family="var(--body)">${t}</text>`}
+      if(showTab&&it.rest)body+=`<text x="${c.x}" y="${tabTop+2.5*TG+8}" text-anchor="middle" font-size="22" fill="${ink}" font-family="var(--body)">–</text>`;
+      g+=`<g class="edcol${playing&&c.i===sel?" now":""}" data-edi="${c.i}">${hit}${body}</g>`;
+    });
+    const scale=.62;
+    return`<svg width="${Math.round(W*scale)}" height="${Math.round(H*scale)}" viewBox="0 ${top} ${W} ${H}" role="img" aria-label="${st.items.length} פריטים, ${cols.length?cols[cols.length-1].bar+1:0} תיבות">${g}</svg>`;
+  }
+  /* ---------- descriptions ---------- */
+  const durName=b=>(DURS.find(d=>d[0]===b)||[0,b+" פעמות"])[1];
+  function describe(i){
+    const it=st.items[i];if(!it)return"";const c=layout().cols[i];
+    const where=`תיבה ${c.bar+1}, פעמה ${c.inBar}`;
+    if(it.rest)return`הפסקה, ${durName(it.beats)}. ${where}.`;
+    const n=noteOf(it.midi);
+    return`${plain(n)} (${nm(n).abc}${n.oct}), ${durName(it.beats)}. ${where}. ${it.f===0?`מיתר ${it.s} פתוח`:`מיתר ${it.s}, סריג ${it.f}`}${it.lock?" (נבחר ידנית)":""}.`;
+  }
+  function panel(){
+    const it=st.items[sel],c=layout().cols[sel];
+    const opt=(a,v,t,on)=>`<button class="btn small" data-ed="${a}" data-v="${v}"${on?` aria-pressed="true"`:""}>${t}</button>`;
+    let h=`<p class="edsel" id="ed-desc" role="status" aria-live="polite"><b>${sel+1} מתוך ${st.items.length}:</b> ${describe(sel)}</p>`;
+    if(c&&c.cross)h+=`<p class="trerr">הפריט חוצה קו תיבה. כדאי לקצר אותו או להוסיף הפסקה לפניו.</p>`;
+    if(!it.rest){
+      const n=noteOf(it.midi),cur=n.L;
+      h+=`<div class="edrow"><span class="lab">שם התו</span><div class="edbtns">${LETTERS.map(L=>opt("name",L,DB.sys==="abc"?L:DB.sys==="sol"?HE[L]:`${HE[L]} <span dir="ltr">${L}</span>`,L===cur)).join("")}${opt("acc",n.acc?0:1,n.acc?"בלי דיאז":"דיאז ♯",false)}</div></div>`;
+      h+=`<div class="edrow"><span class="lab">אוקטבה (${n.oct})</span><div class="edbtns">${opt("oct",-12,"אוקטבה למטה")}${opt("oct",12,"אוקטבה למעלה")}</div></div>`;
+      const ps=positionsOf(it.midi);
+      h+=`<div class="edrow"><span class="lab">מיתר וסריג</span><div class="edbtns">${ps.map(p=>opt("pos",p.s+":"+p.f,p.f===0?`מיתר ${p.s} פתוח`:`מיתר ${p.s} · סריג ${p.f}`,p.s===it.s&&p.f===it.f)).join("")}${it.lock?opt("unlock",1,"בחירה אוטומטית"):""}</div></div>`;
+    }
+    h+=`<div class="edrow"><span class="lab">משך</span><div class="edbtns">${DURS.map(([b,t])=>opt("dur",b,t,b===it.beats)).join("")}</div></div>`;
+    h+=`<div class="edrow"><span class="lab">מיקום ועריכה</span><div class="edbtns">${opt("move",-1,"להקדים")}${opt("move",1,"לאחר")}${opt("restbefore",1,"הפסקה לפני")}${opt("toggle",1,it.rest?"להפוך לתו":"להפוך להפסקה")}${opt("insert",1,"להוסיף תו אחרי")}${opt("del",1,"למחוק")}</div></div>`;
+    return h;
+  }
+  function globals(){
+    return`<div class="edglobal">
+      <label class="seglab" for="ed-bpm">קצב <input id="ed-bpm" type="number" min="40" max="220" step="1" value="${st.bpm}"></label>
+      <label class="seglab" for="ed-ts">משקל <select id="ed-ts">${TS.map(t=>`<option value="${t.join("/")}"${t.join("/")===st.ts.join("/")?" selected":""}>${t.join("/")}</option>`).join("")}</select></label>
+      <label class="seglab" for="ed-pref">פוזיציה <select id="ed-pref">${POS.map(p=>`<option value="${p[0]}"${p[0]===st.pref?" selected":""}>${p[1]}</option>`).join("")}</select></label>
+      <label class="seglab" for="ed-view">תצוגה <select id="ed-view">${VIEWS.map(v=>`<option value="${v[0]}"${v[0]===view?" selected":""}>${v[1]}</option>`).join("")}</select></label>
+    </div>
+    <div class="row"><button class="btn" data-ed="play" data-v="1">${playing?"עצירה":"להשמיע"}</button><button class="btn" data-ed="undo" data-v="1"${hp>0?"":" disabled"}>ביטול</button><button class="btn" data-ed="redo" data-v="1"${hp<hist.length-1?"":" disabled"}>שחזור</button><button class="btn small" data-ed="alloct" data-v="-12">כל המנגינה אוקטבה למטה</button><button class="btn small" data-ed="alloct" data-v="12">כל המנגינה אוקטבה למעלה</button></div>`;
+  }
+  /* ---------- render ---------- */
+  function render(focusSheet){
+    const root=document.getElementById("ed-root");if(!root||!st)return;
+    if(document.activeElement&&document.activeElement.id==="ed-sheet")focusSheet=true;
+    sel=Math.max(0,Math.min(sel,st.items.length-1));
+    const {cols}=layout();
+    root.innerHTML=`<h2>עורך תווים וטאבים</h2>
+      <p class="note-text">לוחצים על תו כדי לערוך אותו. במקלדת: חיצים ימינה ושמאלה לבחירה, חיצים למעלה ולמטה לחצי טון, Delete למחיקה, Ctrl+Z לביטול. מיקום המיתר בטאב הוא הצעה, כי מההקלטה אי אפשר לדעת על איזה מיתר ניגנתם.</p>
+      ${globals()}
+      <div class="trscroll edsheet" id="ed-sheet" tabindex="0" aria-label="התווים והטאבים. חיצים לבחירת תו" aria-describedby="ed-desc">${svg()}</div>
+      <div class="edpanel">${panel()}</div>`;
+    const c=cols[sel],sh=document.getElementById("ed-sheet");
+    if(c&&sh){const x=c.left*.62,w=sh.clientWidth;if(x<sh.scrollLeft+20||x>sh.scrollLeft+w-80)sh.scrollLeft=Math.max(0,x-w/3)}
+    if(focusSheet&&sh)sh.focus({preventScroll:true});
+  }
+  /* ---------- state changes ---------- */
+  function commit(fn,keepTabs){
+    const it=st.items[sel];fn(it);
+    if(!keepTabs)assignTabs(st.items,st.pref);
+    hist=hist.slice(0,hp+1);hist.push(JSON.stringify(st));if(hist.length>200)hist.shift();hp=hist.length-1;
+    persist();render();
+  }
+  function persist(){
+    clearTimeout(saveTimer);
+    saveTimer=setTimeout(()=>{
+      if(TR.clip){TR.clip.score=JSON.parse(JSON.stringify(st));Lib.tx("readonly",s=>s.get(TR.clip.id)).then(o=>{if(o){o.score=TR.clip.score;Lib.put(o)}}).catch(()=>{})}
+    },400);
+  }
+  function load(score){st=JSON.parse(JSON.stringify(score));sel=0;hist=[JSON.stringify(st)];hp=0;stop()}
+  function stop(){playT.forEach(clearTimeout);playT=[];if(playing){playing=false;TR.sources.forEach(s=>{try{s.stop()}catch(e){}});TR.sources=[]}}
+  function play(){
+    if(playing){stop();render();return}
+    if(!audio())return;
+    trStop();playing=true;const spb=60/st.bpm;let t=.08;const from=sel;
+    st.items.forEach((it,i)=>{
+      if(i<from)return;
+      if(!it.rest){const c=bufFor(it.midi),s=ctx.createBufferSource(),g=ctx.createGain();s.buffer=c.b;s.playbackRate.value=c.rate;g.gain.value=.9;s.connect(g);g.connect(bus);s.start(ctx.currentTime+t);s.stop(ctx.currentTime+t+Math.max(.3,it.beats*spb*1.05));TR.sources.push(s)}
+      playT.push(setTimeout(()=>{if(!playing)return;sel=i;markNow()},t*1000));
+      t+=it.beats*spb;
+    });
+    playT.push(setTimeout(()=>{playing=false;render()},t*1000+150));
+    render();
+  }
+  function markNow(){
+    document.querySelectorAll("#ed-sheet .edcol rect:first-child").forEach(r=>{r.setAttribute("fill","transparent");r.setAttribute("opacity",0)});
+    const r=document.querySelector(`#ed-sheet .edcol[data-edi="${sel}"] rect`);if(r){r.setAttribute("fill","var(--zone)");r.setAttribute("opacity",.65)}
+    const c=layout().cols[sel],sh=document.getElementById("ed-sheet");if(c&&sh){const x=c.left*.62;if(x>sh.scrollLeft+sh.clientWidth-80||x<sh.scrollLeft)sh.scrollLeft=Math.max(0,x-40)}
+  }
+  const inRange=m=>m>=LOW&&m<=HIGH;
+  function act(a,v){
+    const it=st.items[sel];
+    if(a==="play")return play();
+    stop();
+    if(a==="undo"){if(hp>0){hp--;st=JSON.parse(hist[hp]);persist();render()}return}
+    if(a==="redo"){if(hp<hist.length-1){hp++;st=JSON.parse(hist[hp]);persist();render()}return}
+    if(a==="name"){const n=noteOf(it.midi),m=12*(n.oct+1)+SEMI[v]-12;if(inRange(m))commit(x=>{x.midi=m;x.lock=false});else announce("התו מחוץ לטווח של הגיטרה");return}
+    if(a==="acc"){const n=noteOf(it.midi),m=12*(n.oct+1)+SEMI[n.L]+(+v)-12;if(inRange(m))commit(x=>{x.midi=m;x.lock=false});return}
+    if(a==="oct"){const m=it.midi+(+v);if(inRange(m))commit(x=>{x.midi=m;x.lock=false});else announce("אין אוקטבה כזו בגיטרה");return}
+    if(a==="alloct"){if(st.items.every(x=>x.rest||inRange(x.midi+(+v))))commit(()=>st.items.forEach(x=>{if(!x.rest){x.midi+=+v;x.lock=false}}));else announce("חלק מהתווים ייצאו מטווח הגיטרה");return}
+    if(a==="pos"){const[s,f]=v.split(":").map(Number);commit(x=>{x.s=s;x.f=f;x.lock=true});return}
+    if(a==="unlock")return commit(x=>{x.lock=false});
+    if(a==="dur")return commit(x=>{x.beats=+v},true);
+    if(a==="move"){const j=sel+(+v);if(j<0||j>=st.items.length)return;commit(()=>{[st.items[sel],st.items[j]]=[st.items[j],st.items[sel]];sel=j});return}
+    if(a==="restbefore")return commit(()=>{st.items.splice(sel,0,{rest:true,beats:1})});
+    if(a==="toggle")return commit(x=>{if(x.rest){delete x.rest;const prev=[...st.items.slice(0,sel)].reverse().find(q=>!q.rest);x.midi=prev?prev.midi:64}else{x.rest=true;delete x.midi;delete x.s;delete x.f;delete x.lock}});
+    if(a==="insert")return commit(x=>{st.items.splice(sel+1,0,x.rest?{rest:true,beats:x.beats}:{midi:x.midi,beats:x.beats});sel++});
+    if(a==="del"){if(st.items.length<2){announce("צריך להשאיר לפחות פריט אחד");return}return commit(()=>{st.items.splice(sel,1);sel=Math.min(sel,st.items.length-1)})}
+  }
+  function key(e){
+    if(!st)return;
+    const k=e.key,ctrl=e.ctrlKey||e.metaKey;
+    if(ctrl&&(k==="z"||k==="Z")){e.preventDefault();act(e.shiftKey?"redo":"undo");return}
+    if(ctrl&&(k==="y"||k==="Y")){e.preventDefault();act("redo");return}
+    if(k==="ArrowRight"){e.preventDefault();sel=Math.min(st.items.length-1,sel+1);render(true);return}
+    if(k==="ArrowLeft"){e.preventDefault();sel=Math.max(0,sel-1);render(true);return}
+    const it=st.items[sel];
+    if((k==="ArrowUp"||k==="ArrowDown")&&!it.rest){e.preventDefault();const d=(k==="ArrowUp"?1:-1)*(e.shiftKey?12:1),m=it.midi+d;if(inRange(m)){commit(x=>{x.midi=m;x.lock=false});document.getElementById("ed-sheet").focus({preventScroll:true});pluck(m)}return}
+    if(k==="Delete"||k==="Backspace"){e.preventDefault();act("del");document.getElementById("ed-sheet").focus({preventScroll:true});return}
+    if(k===" "||k==="Enter"){e.preventDefault();if(!it.rest)pluck(it.midi)}
+  }
+  function bind(){
+    app.addEventListener("click",e=>{
+      if(!e.target.closest("#ed-root"))return;
+      const b=e.target.closest("[data-ed]");if(b){act(b.dataset.ed,b.dataset.v);return}
+      const col=e.target.closest("[data-edi]");if(col){stop();sel=+col.dataset.edi;const it=st.items[sel];if(!it.rest)pluck(it.midi);render(true)}
+    });
+    app.addEventListener("keydown",e=>{if(e.target.id==="ed-sheet")key(e)});
+    app.addEventListener("change",e=>{
+      if(!e.target.closest||!e.target.closest("#ed-root"))return;
+      const t=e.target;
+      if(t.id==="ed-bpm"){const v=Math.round(+t.value);if(v>=40&&v<=220)commit(()=>{st.bpm=v},true);else render();}
+      if(t.id==="ed-ts")commit(()=>{st.ts=t.value.split("/").map(Number)},true);
+      if(t.id==="ed-pref")commit(()=>{st.pref=+t.value;st.items.forEach(x=>{x.lock=false})});
+      if(t.id==="ed-view"){view=t.value;render()}
+    });
+  }
+  bind();
+  return{fromTranscription,fromText,assignTabs,positionsOf,load,render,stop,get:()=>st,select:i=>{sel=i;render()},act};
+})();
 
 /* ---------- microphone check, real guitar test kit, developer report ---------- */
 /* The address where the app runs in its own window, outside the viewer's frame. Empty until it is deployed. */
