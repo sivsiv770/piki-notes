@@ -220,6 +220,17 @@ summary{cursor:pointer;min-height:36px}
 .edrow{display:flex;flex-direction:column;gap:4px}
 .edbtns{display:flex;flex-wrap:wrap;gap:6px}
 .edbtns .btn.small{min-height:44px;padding:.15em .7em}
+.lsteps{display:flex;flex-wrap:wrap;gap:6px;margin-block:8px}
+.lsteps span{border:2px solid var(--line);border-radius:999px;padding:.1em .7em;font-weight:600;font-size:.95rem;background:var(--panel)}
+.lsteps span.on{background:var(--pick);color:var(--on-pick);border-color:var(--on-pick)}
+.lsteps span.past{opacity:.6}
+.lpiki{display:flex;align-items:center;gap:10px;margin-block:8px}
+.lpiki svg{width:64px;height:64px;flex:none}
+.lshow{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr);gap:14px;align-items:center}
+@media (max-width:560px){.lshow{grid-template-columns:minmax(0,1fr)}}
+.lnote{font-family:var(--display);font-weight:400;font-size:2.2rem;display:block}
+.lneck{width:100%;max-width:420px;height:auto}
+.lheard{font-weight:600;min-height:1.6em}
 .edbtns .btn[aria-pressed="true"]{background:var(--pick);color:var(--on-pick);border-color:var(--on-pick)}
 
 /* settings and tuner */
@@ -491,7 +502,7 @@ function fretboard(win,lefty){
 const app=document.getElementById("app"),live=document.getElementById("live");
 function announce(t){live.textContent="";setTimeout(()=>live.textContent=t,30)}
 function show(html){stopAll();app.innerHTML=html;scrollTo(0,0);const h=app.querySelector("h1");if(h){h.tabIndex=-1;h.focus({preventScroll:true})}}
-function stopAll(){if(G){G.over=true;G=null}Mic.stop();trStop(true);if(typeof Ed!=="undefined")Ed.stop()}
+function stopAll(){if(G){G.over=true;G=null}Mic.stop();trStop(true);if(typeof Ed!=="undefined")Ed.stop();if(typeof Lesson!=="undefined")Lesson.stop()}
 function bestStars(id){const s=DB.stars[id]||{};return Math.max(0,...Object.values(s))}
 function isOpen(i){return i===0||DB.set.open||bestStars(LEVELS[i-1].id)>=1}
 function currentLevel(){for(let i=0;i<LEVELS.length;i++)if(isOpen(i)&&bestStars(LEVELS[i].id)===0)return LEVELS[i];
@@ -3225,7 +3236,7 @@ const Ed=(()=>{
   const POS=[[0,"פתוחה (סריגים 0 עד 4)",0,4],[2,"סריג 2 (2 עד 5)",2,5],[5,"סריג 5 (5 עד 9)",5,9],[7,"סריג 7 (7 עד 11)",7,11],[12,"סריג 12 (12 עד 16)",12,16]];
   const TS=[[2,4],[3,4],[4,4],[6,8]];
   const VIEWS=[["both","תווים וטאבים"],["staff","תווים"],["tab","טאבים"]];
-  let st=null,sel=0,hist=[],hp=-1,view="both",playT=[],playing=false,saveTimer=0;
+  let marks=null,st=null,sel=0,hist=[],hp=-1,view="both",playT=[],playing=false,saveTimer=0;
 
   const positionsOf=m=>{const o=[];for(let s=1;s<=6;s++){const f=m-TUNING[s];if(f>=0&&f<=MAXF)o.push({s,f})}return o};
   /* Viterbi over playable positions: stay inside the chosen position, keep the hand still, prefer open strings in first position */
@@ -3313,7 +3324,7 @@ const Ed=(()=>{
     const {cols,W}=layout(),notes=st.items.filter(x=>!x.rest).map(x=>noteOf(x.midi)),r=stepRange(notes.length?notes:[N("E4")]);
     const showStaff=view!=="tab",showTab=view!=="staff";
     const top=showStaff?-r.hi*S:0,staffBottom=showStaff?-r.lo*S:0,tabTop=showStaff?staffBottom+40:30,TG=20,tabBottom=tabTop+5*TG;
-    const bottom=showTab?tabBottom+40:staffBottom+30,H=bottom-top;let g="";
+    const bottom=(showTab?tabBottom+40:staffBottom+30)+(marks?30:0),H=bottom-top;let g="";
     if(showStaff){g+=linesSVG(W)+clefSVG(10)+`<text x="122" y="-76" text-anchor="middle" font-size="58" font-weight="700" fill="${ink}" font-family="Georgia,serif">${st.ts[0]}</text><text x="122" y="-12" text-anchor="middle" font-size="58" font-weight="700" fill="${ink}" font-family="Georgia,serif">${st.ts[1]}</text>`}
     if(showTab){for(let s=1;s<=6;s++)g+=`<line x1="0" x2="${W}" y1="${tabTop+(s-1)*TG}" y2="${tabTop+(s-1)*TG}" stroke="${ink}" stroke-width="1.6"/>`;
       ["T","A","B"].forEach((c,k)=>g+=`<text x="40" y="${tabTop+20+k*30}" text-anchor="middle" font-size="26" font-weight="700" fill="${ink}" font-family="var(--body)">${c}</text>`)}
@@ -3330,6 +3341,7 @@ const Ed=(()=>{
       if(showStaff)body+=`<g transform="translate(${c.x} 0)">${it.rest?restGlyph(it):noteGlyph(it)}</g>`;
       if(showStaff&&c.cross)body+=`<line x1="${c.left+6}" x2="${c.left+c.w-6}" y1="28" y2="28" stroke="var(--doubt)" stroke-width="4" stroke-dasharray="8 6"/>`;
       if(showTab&&!it.rest){const y=tabTop+(it.s-1)*TG,t=String(it.f),w=t.length*14+8;body+=`<rect x="${c.x-w/2}" y="${y-13}" width="${w}" height="26" fill="var(--paper)"/><text x="${c.x}" y="${y+9}" text-anchor="middle" font-size="25" font-weight="700" fill="${ink}" font-family="var(--body)">${t}</text>`}
+      if(marks&&marks[c.i]){const ok=marks[c.i]==="ok",y=showTab?tabBottom+30:staffBottom+20;body+=`<text x="${c.x}" y="${y}" text-anchor="middle" font-size="30" font-weight="700" fill="${ok?"var(--good)":"var(--bad)"}" font-family="var(--body)">${ok?"✓":"✗"}</text>`}
       if(showTab&&it.rest)body+=`<text x="${c.x}" y="${tabTop+2.5*TG+8}" text-anchor="middle" font-size="22" fill="${ink}" font-family="var(--body)">–</text>`;
       g+=`<g class="edcol${playing&&c.i===sel?" now":""}" data-edi="${c.i}">${hit}${body}</g>`;
     });
@@ -3368,6 +3380,7 @@ const Ed=(()=>{
       <label class="seglab" for="ed-pref">פוזיציה <select id="ed-pref">${POS.map(p=>`<option value="${p[0]}"${p[0]===st.pref?" selected":""}>${p[1]}</option>`).join("")}</select></label>
       <label class="seglab" for="ed-view">תצוגה <select id="ed-view">${VIEWS.map(v=>`<option value="${v[0]}"${v[0]===view?" selected":""}>${v[1]}</option>`).join("")}</select></label>
     </div>
+    <div class="row"><button class="btn main" id="lesson-go">למד אותי לנגן את זה</button></div>
     <div class="row"><button class="btn" data-ed="play" data-v="1">${playing?"עצירה":"להשמיע"}</button><button class="btn" data-ed="undo" data-v="1"${hp>0?"":" disabled"}>ביטול</button><button class="btn" data-ed="redo" data-v="1"${hp<hist.length-1?"":" disabled"}>שחזור</button><button class="btn small" data-ed="alloct" data-v="-12">כל המנגינה אוקטבה למטה</button><button class="btn small" data-ed="alloct" data-v="12">כל המנגינה אוקטבה למעלה</button></div>`;
   }
   /* ---------- render ---------- */
@@ -3467,7 +3480,206 @@ const Ed=(()=>{
     });
   }
   bind();
-  return{fromTranscription,fromText,assignTabs,positionsOf,load,render,stop,get:()=>st,select:i=>{sel=i;render()},act};
+  /* draw any list of items with the editor's notation, for the lesson screen */
+  function svgFor(score,items,cur,mk,v){const s0=st,s1=sel,v0=view;st={...score,items};sel=cur;marks=mk||null;view=v||"both";let out;try{out=svg()}finally{st=s0;sel=s1;marks=null;view=v0}return out}
+  return{svgFor,fromTranscription,fromText,assignTabs,positionsOf,load,render,stop,get:()=>st,select:i=>{sel=i;render()},act};
+})();
+
+/* ---------- "teach me to play this": a lesson built from an edited score ---------- */
+const Lesson=(()=>{
+  let L=null;
+  /* Short sections: up to four notes, a rest always ends a section. Indices point into score.items. */
+  function sections(items){
+    const out=[];let cur=[];
+    items.forEach((it,i)=>{
+      if(it.rest){if(cur.length){out.push(cur);cur=[]}return}
+      cur.push(i);if(cur.length===4){out.push(cur);cur=[]}
+    });
+    if(cur.length)out.push(cur);
+    /* a lone note joins the section before it */
+    for(let k=out.length-1;k>0;k--)if(out[k].length===1&&out[k-1].length<5){out[k-1].push(...out[k]);out.splice(k,1)}
+    return out;
+  }
+  const STEPS=[["listen","האזנה"],["show","הדגמה"],["slow","תרגול תו אחר תו"],["flow","נגינה ברצף"]];
+  function start(score){
+    const sc=JSON.parse(JSON.stringify(score));
+    const secs=sections(sc.items);
+    if(!secs.length){announce("אין תווים לתרגול");return}
+    L={score:sc,secs,k:0,step:"listen",tempo:Math.max(50,Math.round(sc.bpm*.7)),hard:new Set(),pass:[],marks:{},pos:0,timer:[],mic:"off",self:false,msg:"",mood:"calm",round:"secs",times:[],firstTry:{}};
+    view={k:"lesson"};rerender();
+  }
+  const secItems=()=>L.secs[L.k].map(i=>L.score.items[i]);
+  const curIdx=()=>L.secs[L.k][L.pos];
+  function neck(it){
+    const s=it.s,f=it.f,from=f<=4?0:f-2,W=300,H=128,fw=(W-30)/5;let g=`<rect x="0" y="0" width="${W}" height="${H}" rx="8" fill="#3B2116"/>`;
+    for(let i=1;i<=5;i++){const x=24+i*fw;g+=`<line x1="${x}" x2="${x}" y1="0" y2="${H}" stroke="#D5DADB" stroke-width="3"/>`}
+    if(from===0)g+=`<rect x="${24+fw-6}" y="0" width="9" height="${H}" fill="#FFF4D9"/>`;
+    for(let k=1;k<=6;k++){const y=10+(k-1)*21.6;g+=`<line x1="0" x2="${W}" y1="${y}" y2="${y}" stroke="#EFE6CF" stroke-width="${.8+k*.45}"/>`}
+    for(let i=0;i<5;i++)g+=`<text x="${24+(i+.5)*fw}" y="${H+22}" text-anchor="middle" font-size="18" font-weight="600" fill="var(--fg)" font-family="var(--body)">${from+i+(from===0?0:0)===0?"":from+i}</text>`;
+    const cx=f===0?12:24+(f-from+.5)*fw,cy=10+(s-1)*21.6;
+    g+=f===0?`<circle cx="${cx}" cy="${cy}" r="10" fill="none" stroke="#FFB400" stroke-width="4"/>`:`<circle cx="${cx}" cy="${cy}" r="12" fill="#FFB400" stroke="#000" stroke-width="2"/>`;
+    return`<svg class="lneck" viewBox="0 -4 ${W} ${H+32}" dir="ltr" role="img" aria-label="${f===0?`מיתר ${s} פתוח, בלי לחוץ על סריג`:`מיתר ${s}, סריג ${f}`}"${DB.set.lefty?` style="transform:scaleX(-1)"`:""}>${g}</svg>`;
+  }
+  function where(it){return it.f===0?`מיתר ${it.s} פתוח, בלי ללחוץ`:`מיתר ${it.s}, אצבע על סריג ${it.f}`}
+  function render(){
+    if(!L)return;
+    const items=secItems(),it=L.score.items[curIdx()],n=noteOf(it.midi),total=L.secs.length;
+    const stepNo=STEPS.findIndex(s=>s[0]===L.step);
+    const sheet=Ed.svgFor({...L.score,bpm:L.tempo},items,L.step==="listen"?-1:L.pos,L.secs[L.k].map(i=>L.marks[i]||null),DB.set.lessonView||"both");
+    const head=L.round==="secs"?`קטע ${L.k+1} מתוך ${total}`:L.round==="hard"?`חזרה על קטע קשה (${L.k+1})`:"כל המנגינה";
+    let body="";
+    if(L.step==="listen")body=`<p class="tag">קודם מקשיבים. לוחצים ושומעים איך הקטע נשמע.</p><div class="row"><button class="btn main" data-ls="play">להשמיע את הקטע</button><button class="btn" data-ls="next">הקשבתי, להמשיך</button></div>`;
+    if(L.step==="show")body=`<p class="tag">עכשיו לומדים כל תו: איפה שמים את האצבע.</p>
+      <div class="lshow"><div><b class="lnote">${label(n)}</b><p>${where(it)}</p><div class="row"><button class="btn" data-ls="hear">לשמוע את התו</button></div></div>${neck(it)}</div>
+      <div class="row"><button class="btn" data-ls="prevnote"${L.pos?"":" disabled"}>התו הקודם</button><button class="btn main" data-ls="nextnote">${L.pos<items.length-1?"התו הבא":"מוכנים לנגן"}</button></div>`;
+    if(L.step==="slow"||L.step==="flow"){
+      const micBox=L.mic==="on"?`<p class="lheard" id="ls-heard" role="status">${esc(L.msg||"פיקי מקשיב...")}</p><div class="meter"><i id="ls-meter"></i></div>`:L.mic==="asking"?`<p role="status">מבקשים גישה למיקרופון...</p>`:"";
+      const selfBox=L.self?`<p class="note-text">המיקרופון לא זמין כאן, אז בודקים לבד: מנגנים את התו ולוחצים.</p><div class="row"><button class="btn main" data-ls="selfok">ניגנתי נכון</button><button class="btn" data-ls="selfbad">טעיתי</button></div>`:"";
+      body=`<p class="tag">${L.step==="slow"?"מנגנים את התו המסומן. פיקי מקשיב ומחכה לך.":`מנגנים את כל הקטע ברצף, בקצב ${L.tempo}. קודם ארבע נקישות ואז מתחילים.`}</p>
+        <div class="lshow"><div><b class="lnote">${label(n)}</b><p>${where(it)}</p></div>${neck(it)}</div>
+        ${micBox}${selfBox}
+        <div class="row">${L.step==="flow"&&!L.running?`<button class="btn main" data-ls="flowgo">להתחיל</button>`:""}<button class="btn" data-ls="hear">לשמוע את התו</button><button class="btn" data-ls="restart">להתחיל את הקטע מחדש</button></div>`;
+    }
+    if(L.step==="done")body=doneHTML();
+    if(L.step==="end")body=endHTML();
+    const html=(`<main class="page lesson"><button class="btn small back" data-ls="exit">חזרה לעורך</button>
+      <div class="head-row"><h1>לומדים לנגן</h1><span class="tagx">${head}</span></div>
+      <div class="lsteps" aria-label="שלבי הקטע">${STEPS.map((s,i)=>`<span class="${i===stepNo?"on":i<stepNo||L.step==="done"?"past":""}">${i+1}. ${s[1]}</span>`).join("")}</div>
+      <div class="lpiki">${piki(L.mood)}<div class="bubble">${esc(L.say||"בוא נלמד את הקטע הזה יחד.")}</div></div>
+      <div class="trscroll edsheet" aria-label="התווים והטאבים של הקטע">${sheet}</div>
+      <section class="sec trbox">${body}</section>
+      <section class="sec"><span class="lab" id="lt">קצב התרגול: ${L.tempo}</span><div class="row"><button class="btn small" data-ls="slower">לאט יותר</button><button class="btn small" data-ls="faster">מהר יותר</button></div></section>
+    </main>`);
+    /* rerender in place: show() would stop the microphone */
+    if(document.querySelector("main.lesson")){const y=scrollY;app.innerHTML=html;scrollTo(0,y)}else show(html);
+  }
+  function doneHTML(){
+    const items=L.secs[L.k],ok=items.filter(i=>L.firstTry[i]===true).length,tm=timingWords();
+    const good=ok===items.length,flow=L.donePhase==="flow";
+    const main=!good?`<button class="btn main" data-ls="againslow">לתרגל שוב לאט יותר</button><button class="btn" data-ls="nextsec">${nextLabel()}</button>`
+      :flow?`<button class="btn main" data-ls="nextsec">${nextLabel()}</button><button class="btn" data-ls="again">לנגן שוב ברצף</button>`
+      :`<button class="btn main" data-ls="toflow">לנגן את הקטע ברצף</button><button class="btn" data-ls="nextsec">${nextLabel()}</button>`;
+    return`<h2>${good?"כל הכבוד!":"עוד קצת תרגול"}</h2>
+      <p class="tag">${ok} מתוך ${items.length} תווים נוגנו נכון כבר בניסיון הראשון.${tm?" "+tm:""}</p>
+      <p class="note-text">פיקי שומע דרך המיקרופון ויכול לטעות, במיוחד ברעש או כשמיתרים ממשיכים לצלצל.</p>
+      <div class="row">${main}</div>`;
+  }
+  function nextLabel(){if(L.round==="secs")return L.k<L.secs.length-1?"לקטע הבא":L.hard.size?"לחזור על הקטעים הקשים":"לנגן את כל המנגינה";if(L.round==="hard")return"להמשיך";return"לסיים"}
+  function endHTML(){
+    const all=L.secs.flat(),ok=all.filter(i=>L.firstTry[i]===true).length,tm=timingWords();
+    return`<h2>${ok===all.length?"ניגנת את כל המנגינה!":"סיימת את המנגינה"}</h2>
+      <p class="tag">${ok} מתוך ${all.length} תווים נכונים בניסיון הראשון.${tm?" "+tm:""}</p>
+      <div class="row"><button class="btn main" data-ls="whole">לנגן שוב את כל המנגינה</button><button class="btn" data-ls="exit">חזרה לעורך</button></div>`;
+  }
+  function timingWords(){
+    const t=L.times;if(t.length<3)return"";
+    const early=t.filter(x=>x<.65).length,late=t.filter(x=>x>1.5).length,okN=t.length-early-late;
+    if(okN>=t.length*.75)return"הקצב היה יציב.";
+    return early>late?"היו תווים מהר מדי. אפשר לנגן לאט יותר.":"היו הפסקות ארוכות בין תווים. אפשר להאט את הקצב בכפתור למטה.";
+  }
+  function clearTimers(){L&&L.timer.forEach(clearTimeout);if(L)L.timer=[];if(L)L.running=false}
+  function playItems(idxs,tempo,mark){
+    if(!audio())return 0;clearTimers();trStop();
+    const spb=60/tempo;let t=.08;
+    idxs.forEach((i,k)=>{const it=L.score.items[i];if(!it.rest){const c=bufFor(it.midi),s=ctx.createBufferSource(),g=ctx.createGain();s.buffer=c.b;s.playbackRate.value=c.rate;g.gain.value=.9;s.connect(g);g.connect(bus);s.start(ctx.currentTime+t);s.stop(ctx.currentTime+t+Math.max(.35,it.beats*spb));TR.sources.push(s)}
+      if(mark)L.timer.push(setTimeout(()=>{if(!L)return;L.pos=k;render()},t*1000));
+      t+=it.beats*spb});
+    return t;
+  }
+  function click(at,acc){const o=ctx.createOscillator(),g=ctx.createGain();o.frequency.value=acc?1500:1000;g.gain.setValueAtTime(.0001,ctx.currentTime+at);g.gain.exponentialRampToValueAtTime(.35,ctx.currentTime+at+.005);g.gain.exponentialRampToValueAtTime(.0001,ctx.currentTime+at+.05);o.connect(g);g.connect(master);o.start(ctx.currentTime+at);o.stop(ctx.currentTime+at+.06)}
+  /* ---------- listening: one pitch stream, notes accepted in order ---------- */
+  const ear={last:null,ticks:0,minR:1,attack:true,lock:0,wrongShown:false,lastAccept:0};
+  function resetEar(){Object.assign(ear,{last:null,ticks:0,minR:1,attack:true,lock:0,wrongShown:false})}
+  function feed(f,r,now){
+    if(!L||!(L.step==="slow"||(L.step==="flow"&&L.running)))return;
+    const m=document.getElementById("ls-meter");if(m)m.style.width=Math.min(100,r*700)+"%";
+    ear.minR=Math.min(ear.minR,r);
+    if(r>Math.max(.006,ear.minR*1.8))ear.attack=true;
+    if(now<ear.lock||!f){ear.ticks=0;return}
+    const it=L.score.items[curIdx()],tgt=it.midi,mf=69+12*Math.log2(f/440),mr=Math.round(mf);
+    if(mr!==ear.last){ear.last=mr;ear.ticks=0}ear.ticks++;
+    const prevIdx=L.pos>0?L.secs[L.k][L.pos-1]:null,prev=prevIdx!=null?L.score.items[prevIdx]:null;
+    const same=prev&&prev.midi===tgt;
+    const near=Math.abs(mf-tgt)<.55,oct=mr!==tgt&&(mr-tgt)%12===0;
+    if((near&&ear.ticks>=2||oct&&ear.ticks>=5)&&(!same||ear.attack||L.pos===0)){accept(now);return}
+    const ringing=prev&&mr===prev.midi;
+    if(ear.ticks===6&&!near&&!oct&&!ringing&&ear.attack&&!ear.wrongShown){
+      ear.wrongShown=true;L.firstTry[curIdx()]=false;L.marks[curIdx()]="bad";
+      const heard=noteOf(mr);L.msg=`פיקי שמע ${plain(heard)}. צריך ${plain(noteOf(tgt))}: ${where(it)}.`;L.say="כמעט! נסה שוב.";L.mood="oops";render();
+    }
+  }
+  function accept(now){
+    const i=curIdx();if(L.firstTry[i]!==false)L.firstTry[i]=true;L.marks[i]=L.firstTry[i]?"ok":"bad";
+    if(L.step==="flow"){const it=L.score.items[i];if(L.lastT!=null){const exp=L.lastBeats*60/L.tempo;L.times.push((now-L.lastT)/1000/exp)}L.lastT=now;L.lastBeats=it.beats}
+    if(L.firstTry[i]===false)L.hard.add(L.k);
+    ear.lock=now+220;ear.attack=false;ear.minR=1;ear.wrongShown=false;ear.ticks=0;
+    L.msg="";L.say=["יופי!","נכון!","בדיוק!","מצוין!"][Math.floor(Math.random()*4)];L.mood="happy";
+    if(L.pos<L.secs[L.k].length-1){L.pos++;render()}else finishSection();
+  }
+  function finishSection(){
+    stopMic();L.donePhase=L.step;L.running=false;
+    const ok=L.secs[L.k].every(i=>L.firstTry[i]===true);
+    if(!ok)L.hard.add(L.k);else if(L.round==="hard")L.hard.delete(L.k);
+    L.step=L.round==="whole"?"end":"done";L.mood=ok?"wow":"calm";L.say=ok?"ניגנת את כל הקטע!":"התקדמת יפה. עוד סיבוב ויהיה מושלם.";
+    try{DB.lessons=DB.lessons||{};DB.lessons.last={when:Date.now(),secs:L.secs.length,hard:[...L.hard]};save()}catch(e){}
+    render();
+  }
+  async function startMic(){
+    if(L.mic==="on"||L.self)return;
+    L.mic="asking";render();
+    try{await Mic.start((f,r)=>feed(f,r,performance.now()));L.mic="on"}
+    catch(e){L.mic="off";L.self=true}
+    render();
+  }
+  function stopMic(){Mic.stop();if(L)L.mic="off"}
+  function beginPractice(step){
+    clearTimers();resetEar();L.step=step;L.pos=0;L.secs[L.k].forEach(i=>{delete L.marks[i];delete L.firstTry[i]});L.times=[];L.lastT=null;L.msg="";
+    L.say=step==="slow"?"מנגנים את התו הראשון.":"מוכנים? לוחצים להתחיל.";L.mood="calm";render();startMic();
+  }
+  function flowGo(){
+    if(!audio())return;L.running=true;resetEar();const spb=60/L.tempo;
+    for(let k=0;k<4;k++)click(.1+k*spb,k===0);
+    L.say="אחת, שתיים, שלוש, ארבע...";render();
+    L.timer.push(setTimeout(()=>{if(!L)return;L.say="עכשיו!";L.lastT=null;render()},(.1+4*spb)*1000));
+  }
+  function goSection(k,round){clearTimers();stopMic();L.k=k;L.round=round||L.round;L.step="listen";L.pos=0;L.say="קודם מקשיבים לקטע.";L.mood="calm";render()}
+  function nextSection(){
+    if(L.round==="secs"){
+      if(L.k<L.secs.length-1)return goSection(L.k+1);
+      if(L.hard.size)return goSection([...L.hard][0],"hard");
+      return whole();
+    }
+    if(L.round==="hard"){const rest=[...L.hard].filter(k=>k!==L.k);if(rest.length)return goSection(rest[0],"hard");return whole()}
+    exit();
+  }
+  function whole(){
+    clearTimers();stopMic();
+    L.wholeSecs=L.wholeSecs||L.secs;L.secs=[L.wholeSecs.flat()];L.k=0;L.round="whole";beginPractice("flow");
+  }
+  function exit(){clearTimers();stopMic();L=null;view={k:"tr"};rerender()}
+  function act(a){
+    if(!L)return;
+    const items=L.secs[L.k];
+    if(a==="exit")return exit();
+    if(a==="play"){playItems(items,L.tempo,false);return}
+    if(a==="hear"){pluck(L.score.items[curIdx()].midi);return}
+    if(a==="next"){L.step="show";L.pos=0;L.say="זה התו הראשון של הקטע.";render();pluck(L.score.items[curIdx()].midi);return}
+    if(a==="prevnote"){L.pos=Math.max(0,L.pos-1);render();pluck(L.score.items[curIdx()].midi);return}
+    if(a==="nextnote"){if(L.pos<items.length-1){L.pos++;render();pluck(L.score.items[curIdx()].midi)}else beginPractice("slow");return}
+    if(a==="restart"){beginPractice(L.step==="flow"?"flow":"slow");return}
+    if(a==="flowgo"){flowGo();return}
+    if(a==="selfok"||a==="selfbad"){const i=curIdx();L.firstTry[i]=a==="selfok";L.marks[i]=a==="selfok"?"ok":"bad";if(L.pos<items.length-1){L.pos++;render()}else finishSection();return}
+    if(a==="again"){beginPractice(L.donePhase||"slow");return}
+    if(a==="toflow"){beginPractice("flow");return}
+    if(a==="againslow"){L.tempo=Math.max(40,Math.round(L.tempo*.85));beginPractice(L.donePhase||"slow");return}
+    if(a==="nextsec"){nextSection();return}
+    if(a==="whole"){L.secs=L.wholeSecs||L.secs;whole();return}
+    if(a==="slower"){L.tempo=Math.max(40,L.tempo-8);render();return}
+    if(a==="faster"){L.tempo=Math.min(200,L.tempo+8);render();return}
+  }
+  app.addEventListener("click",e=>{const b=e.target.closest("[data-ls]");if(b)act(b.dataset.ls)});
+  app.addEventListener("click",e=>{if(e.target.closest("#lesson-go")){const s=Ed.get();if(s)start(s)}});
+  return{start,render,stop:()=>{if(L){clearTimers();Mic.stop();L.mic="off"}},feed,sections,state:()=>L,act};
 })();
 
 /* ---------- microphone check, real guitar test kit, developer report ---------- */
@@ -3893,6 +4105,7 @@ function rerender(){
   else if(view.k==="tr")trPage();
   else if(view.k==="mic")micPage();
   else if(view.k==="dev")devPage();
+  else if(view.k==="lesson")Lesson.render();
 }
 if(/^#(mic|dev|tr)$/.test(location.hash))view={k:location.hash.slice(1)};
 applySettings();rerender();
