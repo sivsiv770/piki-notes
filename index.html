@@ -418,10 +418,12 @@ const Mic={stream:null,an:null,buf:null,timer:0,
     audio();
     const src=ctx.createMediaStreamSource(this.stream);
     this.an=ctx.createAnalyser();this.an.fftSize=4096;src.connect(this.an);this.sink=keepAlive(this.an);this.buf=new Float32Array(this.an.fftSize);this.src=src;
-    this.timer=setInterval(()=>{
+    this.floor=null;this.timer=setInterval(()=>{
       this.an.getFloatTimeDomainData(this.buf);
       let r=0;for(let i=0;i<this.buf.length;i+=4)r+=this.buf[i]*this.buf[i];r=Math.sqrt(r/(this.buf.length/4));
-      const f=r>.006?yin(this.buf,ctx.sampleRate,72,1400):null;
+      /* gate follows the room: phones deliver quiet signals, so a fixed level would miss soft plucks */
+      this.floor=this.floor==null?r:Math.min(this.floor*1.01+1e-6,r);
+      const f=r>Math.max(.0015,this.floor*2.5)?yin(this.buf,ctx.sampleRate,72,1400):null;
       onPitch(f,r);
     },70);
   },
@@ -3593,8 +3595,9 @@ const Lesson=(()=>{
   function feed(f,r,now){
     if(!L||!(L.step==="slow"||(L.step==="flow"&&L.running)))return;
     const m=document.getElementById("ls-meter");if(m)m.style.width=Math.min(100,r*700)+"%";
+    if(window._lsdbg)window._lsdbg.push([Math.round(now),f?+(69+12*Math.log2(f/440)).toFixed(1):null,+r.toFixed(4),L.pos,+ear.minR.toFixed(4),ear.attack?1:0]);
     ear.minR=Math.min(ear.minR,r);
-    if(r>Math.max(.006,ear.minR*1.8))ear.attack=true;
+    if(r>Math.max(.0015,ear.minR*1.8))ear.attack=true;
     if(now<ear.lock||!f){ear.ticks=0;return}
     const it=L.score.items[curIdx()],tgt=it.midi,mf=69+12*Math.log2(f/440),mr=Math.round(mf);
     if(mr!==ear.last){ear.last=mr;ear.ticks=0}ear.ticks++;
