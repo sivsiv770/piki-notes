@@ -3534,7 +3534,7 @@ const Lesson=(()=>{
       <div class="row"><button class="btn" data-ls="prevnote"${L.pos?"":" disabled"}>התו הקודם</button><button class="btn main" data-ls="nextnote">${L.pos<items.length-1?"התו הבא":"מוכנים לנגן"}</button></div>`;
     if(L.step==="slow"||L.step==="flow"){
       const micBox=L.mic==="on"?`<p class="lheard" id="ls-heard" role="status">${esc(L.msg||"פיקי מקשיב...")}</p><div class="meter"><i id="ls-meter"></i></div>`:L.mic==="asking"?`<p role="status">מבקשים גישה למיקרופון...</p>`:"";
-      const selfBox=L.self?`<p class="note-text">המיקרופון לא זמין כאן, אז בודקים לבד: מנגנים את התו ולוחצים.</p><div class="row"><button class="btn main" data-ls="selfok">ניגנתי נכון</button><button class="btn" data-ls="selfbad">טעיתי</button></div>`:"";
+      const selfBox=L.self?`<p class="trerr" role="alert">${esc(L.micText||"המיקרופון לא זמין כאן.")} <span dir="ltr">(${esc(L.micErr||"")})</span></p><div class="row"><button class="btn" data-ls="retrymic">לנסות שוב את המיקרופון</button></div><p class="note-text">בינתיים אפשר לבדוק לבד: מנגנים את התו ולוחצים.</p><div class="row"><button class="btn main" data-ls="selfok">ניגנתי נכון</button><button class="btn" data-ls="selfbad">טעיתי</button></div>`:"";
       body=`<p class="tag">${L.step==="slow"?"מנגנים את התו המסומן. פיקי מקשיב ומחכה לך.":`מנגנים את כל הקטע ברצף, בקצב ${L.tempo}. קודם ארבע נקישות ואז מתחילים.`}</p>
         <div class="lshow"><div><b class="lnote">${label(n)}</b><p>${where(it)}</p></div>${neck(it)}</div>
         ${micBox}${selfBox}
@@ -3628,7 +3628,7 @@ const Lesson=(()=>{
     if(L.mic==="on"||L.self)return;
     L.mic="asking";render();
     try{await Mic.start((f,r)=>feed(f,r,performance.now()));L.mic="on"}
-    catch(e){L.mic="off";L.self=true}
+    catch(e){L.mic="off";L.self=true;L.micErr=(e&&e.name)||"unknown";L.micText=micErrorText(e);try{DB.lastMicErr={name:L.micErr,when:Date.now(),ua:navigator.userAgent};save()}catch(x){}}
     render();
   }
   function stopMic(){Mic.stop();if(L)L.mic="off"}
@@ -3668,6 +3668,7 @@ const Lesson=(()=>{
     if(a==="nextnote"){if(L.pos<items.length-1){L.pos++;render();pluck(L.score.items[curIdx()].midi)}else beginPractice("slow");return}
     if(a==="restart"){beginPractice(L.step==="flow"?"flow":"slow");return}
     if(a==="flowgo"){flowGo();return}
+    if(a==="retrymic"){L.self=false;L.micErr=null;startMic();return}
     if(a==="selfok"||a==="selfbad"){const i=curIdx();L.firstTry[i]=a==="selfok";L.marks[i]=a==="selfok"?"ok":"bad";if(L.pos<items.length-1){L.pos++;render()}else finishSection();return}
     if(a==="again"){beginPractice(L.donePhase||"slow");return}
     if(a==="toflow"){beginPractice("flow");return}
